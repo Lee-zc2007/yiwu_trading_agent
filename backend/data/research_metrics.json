@@ -1,7 +1,0 @@
-[
-  {"key": "interview_merchants", "label": "访谈商户数量", "value": "{{访谈商户数量}}", "status": "placeholder"},
-  {"key": "valid_surveys", "label": "有效问卷数量", "value": "{{有效问卷数量}}", "status": "placeholder"},
-  {"key": "ai_usage_rate", "label": "AI工具使用率", "value": "{{AI工具使用率}}", "status": "placeholder"},
-  {"key": "risk_exposure_rate", "label": "遭遇交易风险的商户比例", "value": "{{遭遇交易风险的商户比例}}", "status": "placeholder"}
-]
-

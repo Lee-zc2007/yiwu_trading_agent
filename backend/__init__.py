@@ -1,0 +1,1 @@
+"""TradeGuard AI backend package."""

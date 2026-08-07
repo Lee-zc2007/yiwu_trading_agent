@@ -1,169 +1,134 @@
-from datetime import datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..core.database import Base
 
 
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
-class Product(Base, TimestampMixin):
-    __tablename__ = "products"
+class Merchant(Base, TimestampMixin):
+    __tablename__ = "merchants"
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120))
-    category: Mapped[str] = mapped_column(String(60))
-    sku: Mapped[str] = mapped_column(String(60), unique=True)
-    image: Mapped[str] = mapped_column(String(255), default="")
-    description: Mapped[str] = mapped_column(Text)
-    price: Mapped[float] = mapped_column(Float)
-    cost: Mapped[float] = mapped_column(Float)
-    moq: Mapped[int] = mapped_column(Integer)
-    stock: Mapped[int] = mapped_column(Integer)
-    lead_days: Mapped[int] = mapped_column(Integer)
-    target_markets: Mapped[str] = mapped_column(String(255))
-    tags: Mapped[str] = mapped_column(String(255))
-    multilingual_points: Mapped[str] = mapped_column(Text)
-    model_config: Mapped[str] = mapped_column(Text, default="{}")
-    popularity: Mapped[int] = mapped_column(Integer, default=70)
+    name: Mapped[str] = mapped_column(String(160))
+    contact: Mapped[str] = mapped_column(String(160), default="")
 
 
 class Customer(Base, TimestampMixin):
     __tablename__ = "customers"
     id: Mapped[int] = mapped_column(primary_key=True)
-    company: Mapped[str] = mapped_column(String(160))
-    contact: Mapped[str] = mapped_column(String(80))
-    country: Mapped[str] = mapped_column(String(80))
-    email: Mapped[str] = mapped_column(String(160))
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    company_name: Mapped[str] = mapped_column(String(200), index=True)
+    country: Mapped[str] = mapped_column(String(80), index=True)
+    region: Mapped[str] = mapped_column(String(100), default="")
+    registration_number: Mapped[str] = mapped_column(String(120), default="")
+    email: Mapped[str] = mapped_column(String(180), default="")
     phone: Mapped[str] = mapped_column(String(80), default="")
-    registered_years: Mapped[int] = mapped_column(Integer)
-    historical_orders: Mapped[int] = mapped_column(Integer)
-    historical_amount: Mapped[float] = mapped_column(Float)
-    source: Mapped[str] = mapped_column(String(80))
-    intent_level: Mapped[str] = mapped_column(String(30))
-    risk_level: Mapped[str] = mapped_column(String(30))
-    credit_score: Mapped[int] = mapped_column(Integer)
-    last_contact: Mapped[str] = mapped_column(String(40))
-    tags: Mapped[str] = mapped_column(String(255))
-    profile_completeness: Mapped[int] = mapped_column(Integer, default=80)
-    disputes: Mapped[int] = mapped_column(Integer, default=0)
-    verification_refused: Mapped[bool] = mapped_column(Boolean, default=False)
+    industry: Mapped[str] = mapped_column(String(120), default="")
+    main_product_category: Mapped[str] = mapped_column(String(120), default="")
+    identity_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    blacklist_status: Mapped[bool] = mapped_column(Boolean, default=False)
+    watchlist_status: Mapped[bool] = mapped_column(Boolean, default=False)
+    cooperation_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    profile_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    transactions: Mapped[list["Transaction"]] = relationship(back_populates="customer", cascade="all, delete-orphan")
 
 
-class Inquiry(Base, TimestampMixin):
-    __tablename__ = "inquiries"
+class Transaction(Base, TimestampMixin):
+    __tablename__ = "transactions"
     id: Mapped[int] = mapped_column(primary_key=True)
-    inquiry_no: Mapped[str] = mapped_column(String(60), unique=True)
-    customer_id: Mapped[int] = mapped_column(Integer)
-    product_id: Mapped[int] = mapped_column(Integer)
-    quantity: Mapped[int] = mapped_column(Integer)
-    target_price: Mapped[float] = mapped_column(Float)
-    payment_method: Mapped[str] = mapped_column(String(80))
-    destination: Mapped[str] = mapped_column(String(120))
-    expected_delivery: Mapped[str] = mapped_column(String(40))
-    status: Mapped[str] = mapped_column(String(40))
-    intent_score: Mapped[int] = mapped_column(Integer)
-    risk_score: Mapped[int] = mapped_column(Integer)
-    ai_summary: Mapped[str] = mapped_column(Text)
-    recommended_action: Mapped[str] = mapped_column(Text)
-    urgent_language: Mapped[bool] = mapped_column(Boolean, default=False)
-    account_changes: Mapped[int] = mapped_column(Integer, default=0)
-
-
-class Quote(Base, TimestampMixin):
-    __tablename__ = "quotes"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    quote_no: Mapped[str] = mapped_column(String(60), unique=True)
-    inquiry_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    product_id: Mapped[int] = mapped_column(Integer)
-    quantity: Mapped[int] = mapped_column(Integer)
-    unit_price: Mapped[float] = mapped_column(Float)
-    discount: Mapped[float] = mapped_column(Float)
-    packaging_fee: Mapped[float] = mapped_column(Float)
-    freight: Mapped[float] = mapped_column(Float)
-    insurance: Mapped[float] = mapped_column(Float)
-    tax: Mapped[float] = mapped_column(Float)
-    total_cost: Mapped[float] = mapped_column(Float)
-    total_amount: Mapped[float] = mapped_column(Float)
-    expected_profit: Mapped[float] = mapped_column(Float)
-    margin_rate: Mapped[float] = mapped_column(Float)
-    incoterm: Mapped[str] = mapped_column(String(20))
-    valid_until: Mapped[str] = mapped_column(String(40))
-    delivery_date: Mapped[str] = mapped_column(String(40))
-    status: Mapped[str] = mapped_column(String(30), default="draft")
-
-
-class Order(Base, TimestampMixin):
-    __tablename__ = "orders"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    order_no: Mapped[str] = mapped_column(String(60), unique=True)
-    customer_id: Mapped[int] = mapped_column(Integer)
-    product_id: Mapped[int] = mapped_column(Integer)
-    quantity: Mapped[int] = mapped_column(Integer)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    order_number: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    product_category: Mapped[str] = mapped_column(String(120))
+    product_name: Mapped[str] = mapped_column(String(200))
     amount: Mapped[float] = mapped_column(Float)
-    profit: Mapped[float] = mapped_column(Float)
-    payment_status: Mapped[str] = mapped_column(String(40))
-    production_status: Mapped[str] = mapped_column(String(40))
-    logistics_status: Mapped[str] = mapped_column(String(40))
-    risk_status: Mapped[str] = mapped_column(String(40))
-    expected_delivery: Mapped[str] = mapped_column(String(40))
-    progress: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(12), default="USD")
+    order_time: Mapped[datetime] = mapped_column(DateTime, index=True)
+    payment_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    shipping_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delivery_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    payment_method: Mapped[str] = mapped_column(String(80))
+    deposit_ratio: Mapped[float] = mapped_column(Float, default=0.3)
+    final_payment_status: Mapped[str] = mapped_column(String(40), default="paid")
+    refund_status: Mapped[str] = mapped_column(String(40), default="none")
+    dispute_status: Mapped[str] = mapped_column(String(40), default="none")
+    overdue_days: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
+    shipping_country: Mapped[str] = mapped_column(String(80))
+    shipping_address: Mapped[str] = mapped_column(String(300))
+
+    customer: Mapped[Customer] = relationship(back_populates="transactions")
 
 
-class RiskAssessment(Base, TimestampMixin):
-    __tablename__ = "risk_assessments"
+class CreditScoreHistory(Base):
+    __tablename__ = "credit_score_history"
     id: Mapped[int] = mapped_column(primary_key=True)
-    customer_id: Mapped[int] = mapped_column(Integer)
-    score: Mapped[int] = mapped_column(Integer)
-    level: Mapped[str] = mapped_column(String(30))
-    factors: Mapped[str] = mapped_column(Text)
-    explanation: Mapped[str] = mapped_column(Text)
-    recommendation: Mapped[str] = mapped_column(Text)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    total_score: Mapped[float] = mapped_column(Float)
+    performance_score: Mapped[float] = mapped_column(Float)
+    stability_score: Mapped[float] = mapped_column(Float)
+    dispute_score: Mapped[float] = mapped_column(Float)
+    identity_score: Mapped[float] = mapped_column(Float)
+    relationship_score: Mapped[float] = mapped_column(Float)
+    risk_level: Mapped[str] = mapped_column(String(40))
+    confidence_level: Mapped[str] = mapped_column(String(40))
+    rule_version: Mapped[str] = mapped_column(String(40), default="credit_v1")
+    calculated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
-class ContractReview(Base, TimestampMixin):
-    __tablename__ = "contract_reviews"
+class RiskRuleConfig(Base):
+    __tablename__ = "risk_rule_config"
     id: Mapped[int] = mapped_column(primary_key=True)
-    title: Mapped[str] = mapped_column(String(120))
-    content: Mapped[str] = mapped_column(Text)
-    risk_level: Mapped[str] = mapped_column(String(30))
-    issues: Mapped[str] = mapped_column(Text)
-    safe_version: Mapped[str] = mapped_column(Text)
+    rule_code: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    rule_name: Mapped[str] = mapped_column(String(160))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    threshold_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    severity: Mapped[str] = mapped_column(String(30), default="medium")
+    version: Mapped[str] = mapped_column(String(40), default="rules_v1")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
-class AfterSalesCase(Base, TimestampMixin):
-    __tablename__ = "after_sales_cases"
+class RiskEvent(Base, TimestampMixin):
+    __tablename__ = "risk_events"
     id: Mapped[int] = mapped_column(primary_key=True)
-    case_no: Mapped[str] = mapped_column(String(60), unique=True)
-    customer: Mapped[str] = mapped_column(String(160))
-    category: Mapped[str] = mapped_column(String(60))
-    satisfaction: Mapped[float] = mapped_column(Float)
-    sentiment: Mapped[str] = mapped_column(String(30))
-    status: Mapped[str] = mapped_column(String(40))
-    repurchase_probability: Mapped[int] = mapped_column(Integer)
-    suggested_contact: Mapped[str] = mapped_column(String(40))
-    suggestion: Mapped[str] = mapped_column(Text)
-
-
-class ResearchMetric(Base, TimestampMixin):
-    __tablename__ = "research_metrics"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    key: Mapped[str] = mapped_column(String(100), unique=True)
-    label: Mapped[str] = mapped_column(String(160))
-    value: Mapped[str] = mapped_column(String(160))
-    status: Mapped[str] = mapped_column(String(30), default="placeholder")
-
-
-class DemoScenario(Base, TimestampMixin):
-    __tablename__ = "demo_scenarios"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(40), unique=True)
-    title: Mapped[str] = mapped_column(String(160))
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id"), nullable=True, index=True)
+    risk_type: Mapped[str] = mapped_column(String(80))
+    risk_level: Mapped[str] = mapped_column(String(30), index=True)
+    risk_score: Mapped[float] = mapped_column(Float)
+    title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text)
-    language: Mapped[str] = mapped_column(String(40))
-    messages: Mapped[str] = mapped_column(Text)
-    risk_hint: Mapped[str] = mapped_column(String(80))
+    triggered_rules: Mapped[list] = mapped_column(JSON, default=list)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    assigned_to: Mapped[str] = mapped_column(String(120), default="")
+    resolution: Mapped[str] = mapped_column(Text, default="")
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    actor: Mapped[str] = mapped_column(String(120), default="demo-user")
+    object_type: Mapped[str] = mapped_column(String(80))
+    object_id: Mapped[str] = mapped_column(String(80))
+    action: Mapped[str] = mapped_column(String(80))
+    before_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    after_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    remark: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

@@ -1,27 +1,61 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: tradeguard
+      POSTGRES_USER: tradeguard
+      POSTGRES_PASSWORD: tradeguard
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradeguard -d tradeguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://tradeguard:tradeguard@postgres:5432/tradeguard
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
-    environment:
-      AI_PROVIDER: mock
-      DATABASE_URL: sqlite:////app/data/yiwu_demo.db
-      FRONTEND_ORIGINS: http://localhost:5173
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
-      - ./backend/data:/app/data
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
+      - ml_artifacts:/app/ml/artifacts
 
   frontend:
-    build: ./frontend
-    ports:
-      - "5173:5173"
+    build:
+      context: frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
     environment:
-      VITE_API_BASE_URL: http://localhost:8000/api
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
     depends_on:
       backend:
         condition: service_healthy
 
+volumes:
+  postgres_data:
+  ml_artifacts:

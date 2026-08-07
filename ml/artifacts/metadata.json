@@ -1,0 +1,29 @@
+{
+  "model_name": "IsolationForest",
+  "model_version": "isolation_forest_v1",
+  "trained_at": "2026-08-06T17:15:12.466931+00:00",
+  "row_count": 300,
+  "feature_names": [
+    "order_amount",
+    "amount_to_history_mean",
+    "amount_zscore",
+    "orders_last_7d",
+    "amount_last_30d",
+    "payment_delay_days",
+    "deposit_ratio",
+    "historical_refund_rate",
+    "historical_dispute_rate",
+    "historical_cancel_rate",
+    "address_change_count_30d",
+    "payment_method_changed",
+    "category_changed",
+    "customer_history_count"
+  ],
+  "random_seed": 42,
+  "contamination": 0.08,
+  "calibration_low": -0.11324267717235813,
+  "calibration_high": 0.030129889830895932,
+  "anomaly_rate": 0.08,
+  "data_type": "reproducible_demo_transactions",
+  "disclaimer": "模型仅用于辅助识别异常交易，不代表欺诈结论。"
+}

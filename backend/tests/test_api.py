@@ -1,63 +1,71 @@
-from pathlib import Path
-import sys
-
-from fastapi.testclient import TestClient
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.main import app  # noqa: E402
+from datetime import datetime
 
 
-def test_health_and_seed_data():
-    with TestClient(app) as client:
-        response = client.get("/api/health")
-        assert response.status_code == 200
-        assert response.json()["status"] == "ok"
-        assert response.json()["products"] >= 5
+def test_health_and_seed_counts(client):
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json()["data"]["status"] == "ok"
+    customers = client.get("/api/customers?page_size=100").json()["data"]
+    transactions = client.get("/api/transactions?page_size=100").json()["data"]
+    alerts = client.get("/api/risk/alerts?page_size=100").json()["data"]
+    assert customers["total"] == 20
+    assert transactions["total"] == 300
+    assert alerts["total"] >= 10
 
 
-def test_dashboard_has_demo_notice():
-    with TestClient(app) as client:
-        payload = client.get("/api/dashboard").json()
-        assert len(payload["metrics"]) == 10
-        assert "Demo" in payload["disclaimer"]
+def test_blacklist_score_and_recalculation_are_deterministic(client):
+    first = client.get("/api/customers/14/credit-score").json()["data"]
+    second = client.post("/api/customers/14/credit-score/recalculate").json()["data"]
+    assert first["total_score"] == second["total_score"]
+    assert first["total_score"] <= 25
+    assert second["risk_level"] == "高风险"
 
 
-def test_quote_calculation_and_pdf():
-    request = {"product_id": 1, "quantity": 1000, "unit_price": 12.8, "unit_cost": 7.6, "discount": 2, "packaging_fee": 100, "freight": 500, "insurance": 40, "tax_rate": 2, "incoterm": "FOB"}
-    with TestClient(app) as client:
-        result = client.post("/api/quotes/calculate", json=request)
-        assert result.status_code == 200
-        assert result.json()["total_amount"] > result.json()["total_cost"]
-        pdf = client.post("/api/quotes/preview/pdf", json=request)
-        assert pdf.status_code == 200
-        assert pdf.headers["content-type"] == "application/pdf"
-        assert pdf.content.startswith(b"%PDF")
+def test_demo_risk_creates_traceable_event(client):
+    response = client.post("/api/risk/demo-scenarios/small_to_large/run")
+    assert response.status_code == 200
+    result = response.json()["data"]
+    assert result["risk_event_id"] is not None
+    assert result["risk_level"] in {"high", "critical"}
+    assert "SMALL_TO_LARGE" in {item["rule_code"] for item in result["triggered_rules"]}
+    event = client.get(f"/api/risk/alerts/{result['risk_event_id']}").json()["data"]
+    assert event["evidence"]["model_version"] == result["model_version"]
 
 
-def test_explainable_risk_model():
-    payload = {"registered_years": 0, "profile_completeness": 20, "historical_orders": 0, "historical_amount": 0, "disputes": 2, "payment_method": "货到付款 COD", "order_amount": 180000, "address_complete": False, "corporate_email": False, "account_changes": 3, "verification_refused": True, "urgent_language": True, "behavior_consistent": False}
-    with TestClient(app) as client:
-        result = client.post("/api/risk/evaluate", json=payload)
-        assert result.status_code == 200
-        body = result.json()
-        assert body["score"] >= 80
-        assert body["level"] == "极高风险"
-        assert len(body["factors"]) >= 12
+def test_high_risk_action_requires_explicit_confirmation(client):
+    event_id = client.get("/api/risk/alerts?page_size=1").json()["data"]["items"][0]["id"]
+    payload = {"status": "investigating", "action": "blacklist", "confirmed": False, "resolution": "测试", "assigned_to": "QA"}
+    rejected = client.put(f"/api/risk/alerts/{event_id}/status", json=payload)
+    assert rejected.status_code == 400
+    payload["confirmed"] = True
+    accepted = client.put(f"/api/risk/alerts/{event_id}/status", json=payload)
+    assert accepted.status_code == 200
 
 
-def test_contract_review_detects_risks():
-    text = "买方要求货到付款，卖方承担全部责任，并可随时变更收款账户。交付时间另行通知。"
-    with TestClient(app) as client:
-        result = client.post("/api/contracts/analyze", json={"text": text})
-        assert result.status_code == 200
-        assert result.json()["risk_level"] == "高风险"
-        assert len(result.json()["issues"]) >= 4
+def test_csv_import_reports_success_and_row_error(client):
+    content = (
+        "customer_id,order_number,product_category,product_name,amount,order_time,payment_method,shipping_country,shipping_address\n"
+        f"1,PYTEST-{datetime.now().timestamp()},家居用品,测试商品,12000,2026-08-07T10:00:00,T/T 30/70,France,Demo Address\n"
+        "999999,PYTEST-BAD,家居用品,测试商品,12000,2026-08-07T10:00:00,T/T 30/70,France,Demo Address\n"
+    )
+    response = client.post("/api/transactions/import", files={"file": ("test.csv", content.encode("utf-8"), "text/csv")})
+    assert response.status_code == 200
+    result = response.json()["data"]
+    assert result["success_count"] == 1
+    assert result["failed_count"] == 1
+    assert result["errors"][0]["row"] == 3
 
 
-def test_impact_calculation():
-    with TestClient(app) as client:
-        result = client.post("/api/analytics/impact", json={})
-        assert result.status_code == 200
-        assert result.json()["saved_hours_day"] > 0
+def test_mock_agent_uses_tools_and_returns_sources(client):
+    response = client.post("/api/agent/chat", json={"message": "解释这个客户为什么有风险", "customer_id": 5, "conversation_id": "pytest"})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["mode"] == "mock"
+    assert len(data["tools_called"]) >= 3
+    assert data["data_sources"]
+    assert "仅基于工具返回" in data["disclaimer"]
 
+
+def test_merchant_isolation_rejects_cross_merchant_access(client):
+    response = client.get("/api/customers/1", headers={"X-Merchant-ID": "999"})
+    assert response.status_code == 404
