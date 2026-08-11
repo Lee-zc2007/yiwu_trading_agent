@@ -7,4 +7,33 @@ export type RuleResult = { triggered:boolean; rule_code:string; rule_name:string
 export type RiskAnalysis = { customer_id:number; order_id:number|null; risk_event_id:number|null; credit_score:number; credit_confidence:string; overall_risk_score:number; risk_level:RiskLevel; statistical_anomaly_score:number; anomaly_score:number; triggered_rules:RuleResult[]; main_reasons:string[]; recommendations:string[]; model_version:string; model_status:string; rule_version:string; disclaimer:string; feature_snapshot:Record<string,number> }
 export type RiskEvent = { id:number; customer_id:number; order_id:number|null; risk_type:string; risk_level:RiskLevel; risk_score:number; title:string; description:string; triggered_rules:RuleResult[]; evidence:Record<string,unknown>; status:string; assigned_to:string; resolution:string; created_at:string; updated_at:string; resolved_at:string|null }
 export type Dashboard = { metrics:Record<string,number>; risk_trend:{date:string;alerts:number;high:number}[]; risk_distribution:{name:string;value:number}[]; high_risk_customers:{id:number;company_name:string;country:string;score:number;risk_level:string}[]; latest_alerts:{id:number;title:string;risk_level:RiskLevel;risk_score:number;status:string;created_at:string}[] }
-export type AgentResponse = { answer:string; mode:string; conversation_id:string; tools_called:{tool:string;arguments:Record<string,unknown>;summary:string}[]; data_sources:string[]; related_customer_ids:number[]; related_order_ids:number[]; related_risk_event_ids:number[]; insufficient_data:boolean; disclaimer:string }
+export type AgentEvidence = { source_type:string; source_id:string; summary:string }
+export type AgentToolCall = { tool:string; arguments:Record<string,unknown>; summary:string }
+export type AgentToolResult = { tool:string; arguments:Record<string,unknown>; success:boolean; data:unknown; summary:string; error_code:string|null; error_message:string|null }
+export type AgentCallChainStep = { step:number; node:string; status:string; detail:Record<string,unknown> }
+export type AgentStateSnapshot = { node:string; message:string; customer_id:number|null; intent:string; tool_calls:{name:string;arguments:Record<string,unknown>;purpose:string}[]; tool_results:AgentToolResult[]; evidence:AgentEvidence[]; final_answer:string }
+export type RelatedCustomer = { id:number; company_name:string; country:string }
+export type AgentResponse = {
+  answer:string
+  tools_used:string[]
+  evidence:AgentEvidence[]
+  related_customer:RelatedCustomer|null
+  related_orders:number[]
+  risk_events:number[]
+  mode:string
+  intent:string
+  conversation_id:string
+  call_chain:AgentCallChainStep[]
+  state_history:AgentStateSnapshot[]
+  tools_called:AgentToolCall[]
+  data_sources:string[]
+  related_customer_ids:number[]
+  related_order_ids:number[]
+  related_risk_event_ids:number[]
+  insufficient_data:boolean
+  disclaimer:string
+}
+export type ConversationToolCall = { tool:string; arguments:Record<string,unknown>; success:boolean; summary:string; error_code:string|null }
+export type ConversationMessage = { id:number|null; role:'user'|'assistant'|'system'|'tool'; content:string; created_at:string; tool_calls:ConversationToolCall[]; tools_used:string[]; evidence:AgentEvidence[] }
+export type ConversationHistory = { conversation_id:string; merchant_id:number; user_id:string; title:string; customer_id:number|null; created_at:string; updated_at:string; messages:ConversationMessage[] }
+export type ConversationSummary = { conversation_id:string; merchant_id:number; user_id:string; title:string; customer_id:number|null; message_count:number; created_at:string; updated_at:string }

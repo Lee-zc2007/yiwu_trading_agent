@@ -168,6 +168,8 @@ LLM 仅能调用白名单工具读取客户档案、信用分、交易、预警�
 | 路演场景 | `GET /api/risk/demo-scenarios`、`POST .../{code}/run` |
 | Agent | `POST /api/agent/chat` |
 
+Agent 会话管理还提供 `POST/GET /api/agent/conversations`、`GET /api/agent/conversations/{id}`、`GET /api/agent/history/{id}` 和 `DELETE /api/agent/conversations/{id}`。会话与脱敏消息持久化到数据库，可按 `conversation_id` 恢复上下文，并通过 `X-Merchant-ID`、`X-User-ID` 双重隔离；详细设计见 [docs/agent-framework.md](docs/agent-framework.md)。
+
 完整请求/响应模型和可交互调用请直接使用 Swagger。
 
 ## 测试与构建

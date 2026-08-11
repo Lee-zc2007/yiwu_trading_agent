@@ -1,8 +1,10 @@
 from datetime import UTC, date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import VECTOR
 
+from ..core.config import settings
 from ..core.database import Base
 
 
@@ -132,3 +134,61 @@ class AuditLog(Base):
     after_data: Mapped[dict] = mapped_column(JSON, default=dict)
     remark: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class AgentConversation(Base, TimestampMixin):
+    """持久化 Agent 会话；对外使用字符串 conversation_id。"""
+
+    __tablename__ = "agent_conversations"
+    __table_args__ = (
+        UniqueConstraint("merchant_id", "user_id", "conversation_id", name="uq_agent_conversation_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    user_id: Mapped[str] = mapped_column(String(120), index=True)
+    conversation_id: Mapped[str] = mapped_column(String(120), index=True)
+    # 以下两个字段用于兼容现有会话列表和恢复客户上下文；标题入库前必须脱敏。
+    title: Mapped[str] = mapped_column(String(120), default="新会话")
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
+
+    messages: Mapped[list["AgentMessage"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="AgentMessage.created_at",
+    )
+
+
+class AgentMessage(Base):
+    """会话消息；content 与 tool_calls 均只允许保存脱敏后的内容。"""
+
+    __tablename__ = "agent_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("agent_conversations.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(30), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    tool_calls: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+    conversation: Mapped[AgentConversation] = relationship(back_populates="messages")
+
+
+class KnowledgeBase(Base):
+    """非结构化风控知识块。
+
+    一行对应文本切分后的一个 chunk。交易、客户、评分和风险事件属于结构化业务
+    数据，禁止写入本表。PostgreSQL 使用 VECTOR；SQLite 仅以 JSON 保存向量用于
+    本地测试兼容。
+    """
+
+    __tablename__ = "knowledge_base"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(240), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float]] = mapped_column(
+        VECTOR(settings.embedding_dimensions).with_variant(JSON(), "sqlite")
+    )
+    category: Mapped[str] = mapped_column(String(80), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)

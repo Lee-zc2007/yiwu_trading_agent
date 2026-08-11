@@ -61,9 +61,53 @@ def test_mock_agent_uses_tools_and_returns_sources(client):
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["mode"] == "mock"
-    assert len(data["tools_called"]) >= 3
+    assert len(data["tools_called"]) >= 2
     assert data["data_sources"]
+    assert data["tools_used"] == ["get_customer_credit_score", "get_customer_transactions", "search_risk_knowledge", "get_order_risk_analysis"]
+    assert data["evidence"]
+    assert data["related_customer"]["id"] == 5
+    assert isinstance(data["related_orders"], list)
+    assert isinstance(data["risk_events"], list)
+    assert [item["node"] for item in data["call_chain"]] == [
+        "START",
+        "Intent Detection",
+        "Tool Selection",
+        "Tool Execution",
+        "Tool Execution",
+        "Evidence Collection",
+        "Response Generation",
+        "END",
+    ]
+    assert len(data["state_history"]) == len(data["call_chain"])
     assert "仅基于工具返回" in data["disclaimer"]
+
+
+def test_agent_accepts_empty_string_ids_and_creates_conversation(client):
+    response = client.post("/api/agent/chat", json={"message": "最近高风险预警", "customer_id": "", "conversation_id": ""})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["mode"] == "mock"
+    assert data["conversation_id"]
+    conversation = client.get(f"/api/agent/conversations/{data['conversation_id']}")
+    assert conversation.status_code == 200
+    assert len(conversation.json()["data"]["messages"]) == 2
+
+
+def test_agent_conversation_management_is_merchant_scoped(client):
+    created = client.post("/api/agent/conversations", json={"title": "路演核验会话", "customer_id": 5})
+    assert created.status_code == 201
+    conversation_id = created.json()["data"]["conversation_id"]
+    assert client.get("/api/agent/conversations").status_code == 200
+    assert client.get(f"/api/agent/conversations/{conversation_id}", headers={"X-Merchant-ID": "999"}).status_code == 404
+    assert client.delete(f"/api/agent/conversations/{conversation_id}").status_code == 200
+
+
+def test_agent_reads_saved_score_without_recalculation(client):
+    before = client.get("/api/customers/5/credit-score/history").json()["data"]
+    response = client.post("/api/agent/chat", json={"message": "解释已有信用和风险证据", "customer_id": "5", "conversation_id": "readonly-score"})
+    after = client.get("/api/customers/5/credit-score/history").json()["data"]
+    assert response.status_code == 200
+    assert len(after) == len(before)
 
 
 def test_merchant_isolation_rejects_cross_merchant_access(client):
