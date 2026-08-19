@@ -61,6 +61,15 @@ class AgentStateSnapshot(BaseModel):
     tool_results: list[dict[str, Any]] = Field(default_factory=list)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     final_answer: str = ""
+    transaction_id: int | None = None
+    context_version: int = 1
+    transaction_context: dict[str, Any] = Field(default_factory=dict)
+    required_fields: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    information_completeness: float = 0
+    next_best_question: str = ""
+    decision_result: dict[str, Any] | None = None
+    comparison: dict[str, Any] | None = None
 
 
 class AgentChatResponse(BaseModel):
@@ -80,6 +89,17 @@ class AgentChatResponse(BaseModel):
     disclaimer: str
     call_chain: list[AgentCallChainStep] = Field(default_factory=list)
     state_history: list[AgentStateSnapshot] = Field(default_factory=list)
+
+    # 与聊天历史分离的结构化交易决策上下文。
+    transaction_id: int | None = None
+    context_version: int = 1
+    transaction_context: dict[str, Any] = Field(default_factory=dict)
+    required_fields: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    information_completeness: float = 0
+    next_best_question: str = ""
+    decision_result: dict[str, Any] | None = None
+    comparison: dict[str, Any] | None = None
 
     # 兼容当前前端的旧字段，后续可在前端迁移完成后再弃用。
     tools_called: list[ToolCallEvidence] = Field(default_factory=list)

@@ -6,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ...core.database import get_db
-from ...models import CreditScoreHistory, Customer, RiskEvent, Transaction
+from ...models import Customer, RiskEvent, Transaction, TransactionEvidenceItem, TransactionMitigation, TransactionTerm
 from ...repositories.customers import CustomerRepository
 from ...risk.service import RiskAssessmentService
 from ...schemas.common import ApiResponse, Pagination
@@ -17,16 +17,6 @@ from ..dependencies import get_merchant_id
 
 router = APIRouter(prefix="/api/risk", tags=["风险"])
 
-SCENARIOS = [
-    {"code": "small_to_large", "title": "小额试单后突然大额采购", "description": "最近 5 笔小额订单后金额放大 8 倍", "customer_id": 1},
-    {"code": "address_changes", "title": "短期频繁更换地址", "description": "30 天内出现多个收货地址", "customer_id": 6},
-    {"code": "overdue_credit", "title": "连续逾期后要求赊账", "description": "连续异常履约并切换 Open Account", "customer_id": 10},
-    {"code": "new_urgent", "title": "新客户要求紧急发货", "description": "低置信度新客户首笔大额采购", "customer_id": 2},
-    {"code": "split_orders", "title": "频繁拆单规避审核", "description": "多笔订单金额接近 5 万美元阈值", "customer_id": 7},
-    {"code": "payment_change", "title": "突然更换付款方式", "description": "从 T/T 切换为 90 天赊账", "customer_id": 12},
-]
-
-
 def event_data(event: RiskEvent) -> dict:
     return {column.name: getattr(event, column.name) for column in RiskEvent.__table__.columns}
 
@@ -35,7 +25,7 @@ def event_data(event: RiskEvent) -> dict:
 def analyze_order(payload: OrderRiskRequest, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
     customer = CustomerRepository(db, merchant_id).get(payload.customer_id)
     if not customer: raise HTTPException(404, "外商不存在或不属于当前商户")
-    result = RiskAssessmentService(db, merchant_id).analyze_order(customer, payload.model_dump(exclude={"persist_event", "scenario_code"}), persist_event=payload.persist_event)
+    result = RiskAssessmentService(db, merchant_id).analyze_order(customer, payload.model_dump(exclude={"persist_event"}), persist_event=payload.persist_event)
     db.commit()
     return {"data": result, "message": "风险检测完成；高风险操作仍需人工确认"}
 
@@ -95,30 +85,52 @@ def risk_dashboard(merchant_id: int = Depends(get_merchant_id), db: Session = De
     distribution = [{"name": level, "value": db.query(RiskEvent).filter(RiskEvent.merchant_id == merchant_id, RiskEvent.risk_level == level).count()} for level in ["low", "medium", "high", "critical"]]
     top = sorted(high_risk, key=lambda item: item[1].total_score)[:5]
     latest = db.query(RiskEvent).filter(RiskEvent.merchant_id == merchant_id).order_by(RiskEvent.created_at.desc()).limit(6).all()
-    metrics = {"customer_count": len(customers), "today_orders": db.query(Transaction).filter(Transaction.merchant_id == merchant_id, Transaction.order_time >= today).count(), "high_risk_customers": len(high_risk), "unresolved_alerts": unresolved, "monthly_risk_amount": round(float(risk_order_amount), 2), "average_credit_score": round(sum(score.total_score for _, score in latest_scores) / max(1, len(latest_scores)), 2)}
+    transactions = db.query(Transaction).filter(Transaction.merchant_id == merchant_id).all()
+    terms_by_transaction = {
+        item.transaction_id: item
+        for item in db.query(TransactionTerm).filter(TransactionTerm.merchant_id == merchant_id).all()
+    }
+    verified_coverage: dict[int, float] = {}
+    for item in db.query(TransactionMitigation).filter(
+        TransactionMitigation.merchant_id == merchant_id,
+        TransactionMitigation.verified.is_(True),
+    ).all():
+        if item.mitigation_type in {"INSURANCE", "GUARANTEE", "LETTER_OF_CREDIT", "PLATFORM_PROTECTION", "ESCROW"}:
+            verified_coverage[item.transaction_id] = verified_coverage.get(item.transaction_id, 0) + item.coverage_amount
+    exposures: dict[int, float] = {}
+    for transaction in transactions:
+        terms = terms_by_transaction.get(transaction.id)
+        payment_before_shipping = terms.planned_payment_before_shipping if terms and terms.planned_payment_before_shipping is not None else transaction.amount * transaction.deposit_ratio
+        planned_shipping = terms.planned_shipping_value if terms and terms.planned_shipping_value is not None else transaction.amount
+        exposures[transaction.id] = max(0, planned_shipping - payment_before_shipping - min(planned_shipping, verified_coverage.get(transaction.id, 0)))
+    high_risk_order_ids = {
+        event.order_id for event in db.query(RiskEvent).filter(
+            RiskEvent.merchant_id == merchant_id,
+            RiskEvent.risk_level.in_(["high", "critical"]),
+            RiskEvent.order_id.is_not(None),
+        ).all()
+    }
+    evidence_transaction_ids = {
+        row[0] for row in db.query(TransactionEvidenceItem.transaction_id).filter(
+            TransactionEvidenceItem.merchant_id == merchant_id,
+            TransactionEvidenceItem.verified.is_(True),
+        ).distinct().all()
+    }
+    due_soon = now + timedelta(days=7)
+    metrics = {
+        "customer_count": len(customers),
+        "today_orders": db.query(Transaction).filter(Transaction.merchant_id == merchant_id, Transaction.order_time >= today).count(),
+        "unresolved_alerts": unresolved,
+        "unsecured_exposure": round(sum(exposures.values()), 2),
+        "high_risk_exposure": round(sum(exposures.get(order_id, 0) for order_id in high_risk_order_ids), 2),
+        "pending_credit_orders": sum(1 for term in terms_by_transaction.values() if (term.credit_days or 0) > 0),
+        "credit_order_amount": round(sum(tx.amount for tx in transactions if (terms_by_transaction.get(tx.id) and (terms_by_transaction[tx.id].credit_days or 0) > 0)), 2),
+        "evidence_missing_orders": sum(1 for tx in transactions if tx.id not in evidence_transaction_ids),
+        "payments_due_soon": sum(1 for term in terms_by_transaction.values() if term.payment_due_date and now <= term.payment_due_date <= due_soon),
+        "terms_adjustment_orders": sum(1 for tx in transactions if (terms_by_transaction.get(tx.id) and ((terms_by_transaction[tx.id].credit_days or 0) > 30 or (terms_by_transaction[tx.id].deposit_ratio if terms_by_transaction[tx.id].deposit_ratio is not None else tx.deposit_ratio) < .3))),
+        # 兼容旧前端和外部调用方，后续版本再弃用。
+        "high_risk_customers": len(high_risk),
+        "monthly_risk_amount": round(float(risk_order_amount), 2),
+        "average_credit_score": round(sum(score.total_score for _, score in latest_scores) / max(1, len(latest_scores)), 2),
+    }
     return {"data": {"metrics": metrics, "risk_trend": trend, "risk_distribution": distribution, "high_risk_customers": [{"id": customer.id, "company_name": customer.company_name, "country": customer.country, "score": score.total_score, "risk_level": score.risk_level} for customer, score in top], "latest_alerts": [{"id": event.id, "title": event.title, "risk_level": event.risk_level, "risk_score": event.risk_score, "status": event.status, "created_at": event.created_at.isoformat()} for event in latest]}}
-
-
-@router.get("/demo-scenarios", response_model=ApiResponse[list[dict]])
-def demo_scenarios():
-    return {"data": SCENARIOS}
-
-
-@router.post("/demo-scenarios/{code}/run", response_model=ApiResponse[OrderRiskResponse])
-def run_demo_scenario(code: str, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
-    scenario = next((item for item in SCENARIOS if item["code"] == code), None)
-    if not scenario: raise HTTPException(404, "演示场景不存在")
-    customer = CustomerRepository(db, merchant_id).get(scenario["customer_id"])
-    if not customer: raise HTTPException(404, "演示外商不存在，请重新初始化数据")
-    history = db.query(Transaction).filter(Transaction.customer_id == customer.id).order_by(Transaction.order_time).all()
-    average = sum(item.amount for item in history) / max(1, len(history))
-    base = {"customer_id": customer.id, "amount": round(average * 1.1, 2), "product_category": customer.main_product_category, "product_name": "路演模拟订单", "payment_method": history[-1].payment_method if history else "T/T 30/70", "deposit_ratio": .3, "shipping_country": customer.country, "shipping_address": history[-1].shipping_address if history else f"Demo Address, {customer.country}", "order_time": datetime.now(UTC).replace(tzinfo=None)}
-    if code == "small_to_large": base["amount"] = round(max(60000, average * 8), 2)
-    elif code == "address_changes": base["shipping_address"] = "New Forwarder Warehouse, Rotterdam"
-    elif code == "overdue_credit": base.update(amount=45000, payment_method="Open Account 90 days", deposit_ratio=0)
-    elif code == "new_urgent": base.update(amount=85000, payment_method="Cash on Delivery", deposit_ratio=0)
-    elif code == "split_orders": base["amount"] = 43800
-    elif code == "payment_change": base.update(payment_method="Open Account 90 days", deposit_ratio=0)
-    result = RiskAssessmentService(db, merchant_id).analyze_order(customer, {key: value for key, value in base.items() if key != "customer_id"}, persist_event=True)
-    db.commit()
-    return {"data": result, "message": f"已运行场景：{scenario['title']}"}

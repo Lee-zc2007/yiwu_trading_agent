@@ -1,6 +1,6 @@
 """AI Agent Service 层。
 
-统一执行链路：用户问题 -> 意图识别 -> 白名单工具 -> 业务证据 -> Mock/LLM 回答。
+统一执行链路：用户问题 -> 意图识别 -> 白名单工具 -> 业务证据 -> DeepSeek/确定性回答。
 本服务不持有数据库 Session，也不会调用任何评分或风险计算函数。
 """
 
@@ -10,8 +10,7 @@ from .conversation import ConversationStore, conversation_manager
 from .graph import build_agent_graph
 from .intent import IntentRecognizer
 from .llm_agent import LLMProvider, LLMAgent, OpenAICompatibleProvider
-from .mock_agent import MockAgent
-from .schemas import AgentDataGateway, EvidenceRef, ToolResult
+from .schemas import AgentDataGateway, DecisionContextStore, EvidenceRef, ToolResult
 from .tools import AgentToolRegistry
 
 
@@ -26,28 +25,31 @@ class AgentService:
         gateway: AgentDataGateway,
         merchant_id: int,
         conversations: ConversationStore | None = None,
+        decision_contexts: DecisionContextStore | None = None,
         provider: LLMProvider | None = None,
     ):
         self.gateway = gateway
         self.merchant_id = merchant_id
         self.conversations = conversations or conversation_manager
+        self.decision_contexts = decision_contexts
         self.intent_recognizer = IntentRecognizer()
         self.tools = AgentToolRegistry(gateway)
-        self.mock_agent = MockAgent(self.tools)
-        self.graph = build_agent_graph(self.tools, self.intent_recognizer)
+        self.graph = build_agent_graph(self.tools, self.intent_recognizer, decision_contexts, merchant_id)
         self.provider = provider
 
     def _runner(self):
-        """没有 API Key 或未启用 LLM 时始终选择可演示的 Mock Agent。"""
+        """构造 DeepSeek/OpenAI-compatible Runner，不提供 Mock 降级。"""
 
         if settings.agent_mode != "llm" or not settings.llm_api_key:
-            return self.mock_agent
+            return None
         provider = self.provider or OpenAICompatibleProvider(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
             model=settings.llm_model,
+            timeout_seconds=settings.llm_timeout_seconds,
+            max_retries=settings.llm_max_retries,
         )
-        return LLMAgent(self.tools, provider, self.mock_agent)
+        return LLMAgent(self.tools, provider)
 
     @staticmethod
     def _collect_evidence(results: list[ToolResult]) -> list[AgentEvidence]:
@@ -77,13 +79,26 @@ class AgentService:
         )
         self.conversations.append_message(self.merchant_id, conversation.conversation_id, "user", message)
 
-        # 无 LLM 时以决策图作为主执行路径；配置 LLM 后继续保留现有 Provider
-        # Tool Calling 接口，后续可将 Provider 注入图的 Response Generation 节点。
-        if settings.agent_mode != "llm" or not settings.llm_api_key:
-            execution = self.graph.run(message, effective_customer_id)
+        # 交易授信计算始终由确定性状态机完成；其余意图在配置有效时优先由
+        # DeepSeek 选择只读 Tool 并基于 Tool 证据组织回答。
+        preliminary_intent = self.intent_recognizer.recognize(message, effective_customer_id)
+        stored_context = self.decision_contexts.load(self.merchant_id, conversation.conversation_id) if self.decision_contexts else {}
+        has_active_decision = bool(stored_context.get("transaction_context"))
+        llm_enabled = settings.agent_mode == "llm" and bool(settings.llm_api_key)
+        runner = self._runner() if llm_enabled else None
+        if not llm_enabled:
+            execution = self.graph.run(message, effective_customer_id, conversation.conversation_id)
+        elif preliminary_intent.name in {"transaction_decision", "modify_transaction_terms"} or has_active_decision:
+            # 风控计算先走确定性状态机，再由 DeepSeek 基于结果生成用户可见回答。
+            deterministic_execution = self.graph.run(message, effective_customer_id, conversation.conversation_id)
+            execution = runner.explain_deterministic_execution(
+                message,
+                effective_customer_id,
+                deterministic_execution,
+            )
         else:
-            intent = self.intent_recognizer.recognize(message, effective_customer_id)
-            execution = self._runner().run(message, effective_customer_id, intent)
+            intent = preliminary_intent
+            execution = runner.run(message, effective_customer_id, intent)
             execution.intent = execution.intent or intent.name
             if not execution.call_chain:
                 execution.call_chain, execution.state_history = self.graph.trace_existing_execution(
@@ -113,6 +128,15 @@ class AgentService:
             disclaimer=DISCLAIMER,
             call_chain=execution.call_chain,
             state_history=execution.state_history,
+            transaction_id=execution.transaction_id,
+            context_version=execution.context_version,
+            transaction_context=execution.transaction_context,
+            required_fields=execution.required_fields,
+            missing_fields=execution.missing_fields,
+            information_completeness=execution.information_completeness,
+            next_best_question=execution.next_best_question,
+            decision_result=execution.decision_result,
+            comparison=execution.comparison,
             # 以下字段继续服务现有前端，保持 MVP 无破坏升级。
             tools_called=[{"tool": item.tool, "arguments": item.arguments, "summary": item.summary} for item in execution.tool_results],
             data_sources=[f"{item.source_type}:{item.source_id}" for item in evidence],

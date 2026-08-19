@@ -9,8 +9,9 @@ from copy import deepcopy
 from importlib.util import find_spec
 from typing import Any, TypedDict
 
+from .context import TransactionContextExtractor, merge_context, required_field_status
 from .intent import IntentRecognizer
-from .schemas import AgentExecution, EvidenceRef, ToolResult
+from .schemas import AgentExecution, DecisionContextStore, EvidenceRef, ToolResult
 from .tools import AgentToolRegistry
 
 
@@ -31,41 +32,163 @@ class AgentState(TypedDict):
     final_answer: str
     call_chain: list[dict[str, Any]]
     state_history: list[dict[str, Any]]
+    conversation_id: str
+    transaction_id: int | None
+    context_version: int
+    transaction_context: dict[str, Any]
+    previous_transaction_context: dict[str, Any]
+    context_patch: dict[str, Any]
+    required_fields: list[str]
+    missing_fields: list[str]
+    information_completeness: float
+    next_best_question: str
+    decision_result: dict[str, Any] | None
+    comparison: dict[str, Any] | None
 
 
 class AgentDecisionGraph:
     """可替换为 LangGraph CompiledGraph 的确定性决策图。"""
 
-    def __init__(self, tools: AgentToolRegistry, intent_recognizer: IntentRecognizer | None = None):
+    def __init__(
+        self,
+        tools: AgentToolRegistry,
+        intent_recognizer: IntentRecognizer | None = None,
+        context_store: DecisionContextStore | None = None,
+        merchant_id: int = 1,
+    ):
         self.tools = tools
         self.intent_recognizer = intent_recognizer or IntentRecognizer()
+        self.context_store = context_store
+        self.merchant_id = merchant_id
+        self.context_extractor = TransactionContextExtractor()
 
     def invoke(self, state: AgentState | dict[str, Any]) -> AgentState:
         """执行完整图；方法签名与 LangGraph ``invoke`` 保持一致。"""
 
         current = self._normalize_state(state)
         self._checkpoint(current, START)
+        current = self.load_context(current)
         current = self.intent_detection(current)
+        current = self.extract_context_patch(current)
+        current = self.merge_decision_context(current)
+        current = self.resolve_customer(current)
+        current = self.check_required_fields(current)
+        if self._is_decision_intent(current["intent"]) and current["missing_fields"]:
+            current = self.choose_next_best_question(current)
+            current = self.save_context(current)
+            current["final_answer"] = (
+                f"我已记录当前交易条件，信息完整度为 {current['information_completeness']:.0%}。"
+                f"为继续计算风险敞口和授信条件，请补充：{current['next_best_question']}"
+            )
+            self._checkpoint(current, "Response Generation", {"source": "next_best_question"})
+            self._checkpoint(current, END)
+            return current
         current = self.tool_selection(current)
         current = self.tool_execution(current)
         current = self.evidence_collection(current)
         current = self.response_generation(current)
+        if self._is_decision_intent(current["intent"]):
+            current = self.save_context(current)
         self._checkpoint(current, END)
         return current
 
-    def run(self, message: str, customer_id: int | None) -> AgentExecution:
+    def run(self, message: str, customer_id: int | None, conversation_id: str = "") -> AgentExecution:
         """Agent Service 使用的便捷入口。"""
 
-        state = self.invoke({"message": message, "customer_id": customer_id})
+        state = self.invoke({"message": message, "customer_id": customer_id, "conversation_id": conversation_id})
         return AgentExecution(
             answer=state["final_answer"],
             tool_results=state["tool_results"],
             insufficient_data=not self._has_required_result(state),
-            mode="mock",
+            # 该路径由确定性状态机和只读 Tool 产生，不是模拟数据或 Mock 回答。
+            mode="deterministic",
             intent=state["intent"],
             call_chain=state["call_chain"],
             state_history=state["state_history"],
+            transaction_id=state["transaction_id"],
+            context_version=state["context_version"],
+            transaction_context=state["transaction_context"],
+            required_fields=state["required_fields"],
+            missing_fields=state["missing_fields"],
+            information_completeness=state["information_completeness"],
+            next_best_question=state["next_best_question"],
+            decision_result=state["decision_result"],
+            comparison=state["comparison"],
         )
+
+    def load_context(self, state: AgentState) -> AgentState:
+        stored = self.context_store.load(self.merchant_id, state["conversation_id"]) if self.context_store and state["conversation_id"] else {}
+        if stored:
+            state["customer_id"] = state["customer_id"] or stored.get("customer_id")
+            state["transaction_id"] = stored.get("transaction_id")
+            state["context_version"] = int(stored.get("context_version", 1))
+            state["transaction_context"] = dict(stored.get("transaction_context") or {})
+            state["required_fields"] = list(stored.get("required_fields") or [])
+            state["missing_fields"] = list(stored.get("missing_fields") or [])
+            state["information_completeness"] = float(stored.get("information_completeness") or 0)
+            state["next_best_question"] = str(stored.get("next_best_question") or "")
+        state["previous_transaction_context"] = deepcopy(state["transaction_context"])
+        self._checkpoint(state, "Load Context", {"context_version": state["context_version"], "has_context": bool(state["transaction_context"])})
+        return state
+
+    def extract_context_patch(self, state: AgentState) -> AgentState:
+        state["context_patch"] = self.context_extractor.extract(
+            state["message"], state["transaction_context"], state["missing_fields"]
+        )
+        if state["context_patch"] and (
+            state["intent"] == "unknown"
+            or (state["previous_transaction_context"] and state["intent"] != "modify_transaction_terms")
+        ):
+            state["intent"] = "transaction_decision"
+        self._checkpoint(state, "Context Extraction", {"extracted_fields": sorted(state["context_patch"])})
+        return state
+
+    def merge_decision_context(self, state: AgentState) -> AgentState:
+        state["transaction_context"] = merge_context(state["transaction_context"], state["context_patch"])
+        self._checkpoint(state, "Context Merge", {"patched_fields": sorted(state["context_patch"])})
+        return state
+
+    def resolve_customer(self, state: AgentState) -> AgentState:
+        if self._is_decision_intent(state["intent"]) and state["customer_id"]:
+            result = self.tools.execute("get_customer_profile", {"customer_id": state["customer_id"]})
+            state["tool_results"].append(result)
+            if result.success and state["transaction_context"].get("identity_verified") is None:
+                state["transaction_context"]["identity_verified"] = result.data.get("identity_verified")
+            self._checkpoint(state, "Resolve Customer", {"customer_id": state["customer_id"], "success": result.success})
+        else:
+            self._checkpoint(state, "Resolve Customer", {"customer_id": state["customer_id"], "skipped": True})
+        return state
+
+    def check_required_fields(self, state: AgentState) -> AgentState:
+        if self._is_decision_intent(state["intent"]):
+            required, missing, completeness, question = required_field_status(state["transaction_context"])
+            state["required_fields"] = required
+            state["missing_fields"] = missing
+            state["information_completeness"] = completeness
+            state["next_best_question"] = question
+        self._checkpoint(state, "Required Fields", {"missing_fields": state["missing_fields"], "information_completeness": state["information_completeness"]})
+        return state
+
+    def choose_next_best_question(self, state: AgentState) -> AgentState:
+        self._checkpoint(state, "Next Best Question", {"question": state["next_best_question"]})
+        return state
+
+    def save_context(self, state: AgentState) -> AgentState:
+        if self.context_store and state["conversation_id"]:
+            stored = self.context_store.save(
+                self.merchant_id,
+                state["conversation_id"],
+                customer_id=state["customer_id"],
+                transaction_id=state["transaction_id"],
+                transaction_context=state["transaction_context"],
+                required_fields=state["required_fields"],
+                missing_fields=state["missing_fields"],
+                information_completeness=state["information_completeness"],
+                next_best_question=state["next_best_question"],
+            )
+            state["context_version"] = stored["context_version"]
+        self._checkpoint(state, "Save Context", {"context_version": state["context_version"]})
+        return state
 
     def trace_existing_execution(
         self,
@@ -119,7 +242,22 @@ class AgentDecisionGraph:
         intent = state["intent"]
         calls: list[dict[str, Any]] = []
 
-        if intent == "customer_profile":
+        if intent == "transaction_decision":
+            calls.append(self._call("evaluate_credit_terms", {
+                "transaction_context": state["transaction_context"],
+                "customer_id": customer_id,
+                "transaction_id": state["transaction_id"],
+            }, purpose="transaction_decision"))
+        elif intent == "modify_transaction_terms":
+            calls.append(self._call("simulate_transaction_adjustment", {
+                "base_context": state["previous_transaction_context"],
+                "adjustments": state["context_patch"],
+                "customer_id": customer_id,
+                "transaction_id": state["transaction_id"],
+            }, purpose="decision_simulation"))
+        elif intent == "risk_methodology":
+            calls.append(self._call("get_risk_evaluation_criteria", {}, purpose="system_methodology"))
+        elif intent == "customer_profile":
             target = customer_id or self._first(entity_ids)
             if target:
                 calls.append(self._call("get_customer_profile", {"customer_id": target}))
@@ -209,13 +347,81 @@ class AgentDecisionGraph:
             state["final_answer"] = f"数据不足，无法基于系统证据回答。原因：{reason}。"
         else:
             state["final_answer"] = self._answer_from_results(state["intent"], successful, state["evidence"])
+        if state["intent"] == "transaction_decision":
+            state["decision_result"] = next(
+                (item.data for item in state["tool_results"] if item.tool == "evaluate_credit_terms" and item.success),
+                None,
+            )
+        elif state["intent"] == "modify_transaction_terms":
+            simulation = next(
+                (item.data for item in state["tool_results"] if item.tool == "simulate_transaction_adjustment" and item.success),
+                None,
+            )
+            if simulation:
+                state["decision_result"] = simulation.get("after")
+                state["comparison"] = simulation.get("comparison")
         self._checkpoint(state, "Response Generation", {"answer_generated": bool(state["final_answer"])})
         return state
 
     def _answer_from_results(self, intent: str, results: list[ToolResult], evidence: list[EvidenceRef]) -> str:
         by_tool = {result.tool: result.data for result in results}
 
-        if intent == "customer_profile" and "get_customer_profile" in by_tool:
+        if intent == "transaction_decision" and "evaluate_credit_terms" in by_tool:
+            data = by_tool["evaluate_credit_terms"]
+            trust = data["customer_trust"]
+            risk = data["transaction_risk"]
+            exposure = data["risk_exposure"]
+            evidence_data = data["evidence"]
+            recommendations = "；".join(data.get("recommendations", [])[:5]) or "按当前条件继续人工复核"
+            answer = (
+                f"根据系统确定性交易决策，客户历史可信度为 {trust['trust_level']}（{trust['confidence_level']} 置信度），"
+                f"本次交易风险为 {risk['risk_level']}。预计最大风险敞口为 "
+                f"{exposure['projected_max_exposure']:,.2f} {exposure['currency']}，证据完整度为 {evidence_data['completeness']:.0%}。"
+                f"当前建议状态：{data['decision_status']}。建议：{recommendations}。最终决策需人工确认。"
+            )
+        elif intent == "modify_transaction_terms" and "simulate_transaction_adjustment" in by_tool:
+            data = by_tool["simulate_transaction_adjustment"]
+            before, after, comparison = data["before"], data["after"], data["comparison"]
+            answer = (
+                f"已完成纯模拟，没有修改正式交易。调整前预计最大敞口为 "
+                f"{before['risk_exposure']['projected_max_exposure']:,.2f} {before['risk_exposure']['currency']}，"
+                f"调整后为 {after['risk_exposure']['projected_max_exposure']:,.2f} {after['risk_exposure']['currency']}，"
+                f"变化 {comparison['projected_exposure_change']:,.2f}。建议状态从 "
+                f"{comparison['decision_status_before']} 变为 {comparison['decision_status_after']}。"
+            )
+        elif intent == "risk_methodology" and "get_risk_evaluation_criteria" in by_tool:
+            data = by_tool["get_risk_evaluation_criteria"]
+            trust = data["customer_trust"]
+            risk = data["transaction_risk"]
+            exposure = data["risk_exposure"]
+            evidence_data = data["evidence_completeness"]
+            rules = "\n".join(
+                f"| `{item['rule_code']}` | {item['rule_name']} | {item['severity']} |"
+                for item in risk["enabled_rules"]
+            )
+            answer = (
+                "## 系统对客户与交易风险的评价标准\n\n"
+                f"当前采用 `{data['decision_version']}` 决策链和 `{risk['version']}` 规则版本。"
+                "系统不判断客户是不是骗子，而是分别评价客户历史可信度和本次交易条件。\n\n"
+                "### 1. Customer Trust：客户过去是否可靠\n\n"
+                + "、".join(trust["indicators"])
+                + f"。{trust['unknown_data_policy']}。\n\n"
+                "### 2. Transaction Risk：本次交易是否异常\n\n"
+                f"当前数据库启用了 {risk['enabled_rule_count']} 条规则：\n\n"
+                "| 规则代码 | 规则名称 | 严重度 |\n|---|---|---|\n"
+                f"{rules}\n\n"
+                "### 3. Risk Exposure：可能损失多少未收款货值\n\n"
+                f"- 当前敞口：`{exposure['formulas']['current']}`\n"
+                f"- 预计最大敞口：`{exposure['formulas']['projected']}`\n\n"
+                "### 4. Evidence、Mitigation 与 Credit Terms\n\n"
+                f"- 关键证据：{'、'.join(evidence_data['critical_types'])}\n"
+                f"- 证据完整度：{evidence_data['formula']}\n"
+                f"- 可抵扣保障：{'、'.join(data['risk_mitigation']['monetary_coverage_types'])}\n"
+                "- 系统给出定金、账期、敞口和付款/发货条件建议，但最终必须人工决策。\n\n"
+                "### 5. Isolation Forest\n\n"
+                "仅作为行为异常辅助信号，不能单独产生 HIGH 或 CRITICAL，也不能用于认定欺诈。"
+            )
+        elif intent == "customer_profile" and "get_customer_profile" in by_tool:
             data = by_tool["get_customer_profile"]
             answer = (
                 f"根据系统外商档案，{data['company_name']} 位于 {data['country']}，行业为"
@@ -326,7 +532,23 @@ class AgentDecisionGraph:
             "final_answer": str(state.get("final_answer", "")),
             "call_chain": list(state.get("call_chain", [])),
             "state_history": list(state.get("state_history", [])),
+            "conversation_id": str(state.get("conversation_id", "")),
+            "transaction_id": state.get("transaction_id"),
+            "context_version": int(state.get("context_version", 1)),
+            "transaction_context": dict(state.get("transaction_context", {})),
+            "previous_transaction_context": dict(state.get("previous_transaction_context", {})),
+            "context_patch": dict(state.get("context_patch", {})),
+            "required_fields": list(state.get("required_fields", [])),
+            "missing_fields": list(state.get("missing_fields", [])),
+            "information_completeness": float(state.get("information_completeness", 0)),
+            "next_best_question": str(state.get("next_best_question", "")),
+            "decision_result": state.get("decision_result"),
+            "comparison": state.get("comparison"),
         }
+
+    @staticmethod
+    def _is_decision_intent(intent: str) -> bool:
+        return intent in {"transaction_decision", "modify_transaction_terms"}
 
     @staticmethod
     def _call(name: str, arguments: dict[str, Any], purpose: str = "business_query") -> dict[str, Any]:
@@ -355,6 +577,9 @@ class AgentDecisionGraph:
             "risk_event_detail": ["get_risk_event_detail"],
             "risk_explanation": ["get_customer_profile", "get_customer_credit_score"],
             "knowledge_search": ["search_risk_knowledge"],
+            "risk_methodology": ["get_risk_evaluation_criteria"],
+            "transaction_decision": ["evaluate_credit_terms"],
+            "modify_transaction_terms": ["simulate_transaction_adjustment"],
         }.get(intent, [])
 
     def _has_required_result(self, state: AgentState) -> bool:
@@ -405,6 +630,15 @@ class AgentDecisionGraph:
             "tool_results": [self._serialize_tool_result(item) for item in state["tool_results"]],
             "evidence": [self._serialize_evidence(item) for item in state["evidence"]],
             "final_answer": state["final_answer"],
+            "transaction_id": state["transaction_id"],
+            "context_version": state["context_version"],
+            "transaction_context": deepcopy(state["transaction_context"]),
+            "required_fields": list(state["required_fields"]),
+            "missing_fields": list(state["missing_fields"]),
+            "information_completeness": state["information_completeness"],
+            "next_best_question": state["next_best_question"],
+            "decision_result": deepcopy(state["decision_result"]),
+            "comparison": deepcopy(state["comparison"]),
         })
 
     @staticmethod
@@ -424,10 +658,15 @@ class AgentDecisionGraph:
         return {"source_type": item.source_type, "source_id": item.source_id, "summary": item.summary}
 
 
-def build_agent_graph(tools: AgentToolRegistry, intent_recognizer: IntentRecognizer | None = None) -> AgentDecisionGraph:
+def build_agent_graph(
+    tools: AgentToolRegistry,
+    intent_recognizer: IntentRecognizer | None = None,
+    context_store: DecisionContextStore | None = None,
+    merchant_id: int = 1,
+) -> AgentDecisionGraph:
     """统一图构建入口；未来可在此切换为 LangGraph StateGraph。"""
 
-    return AgentDecisionGraph(tools, intent_recognizer)
+    return AgentDecisionGraph(tools, intent_recognizer, context_store, merchant_id)
 
 
 def graph_status() -> dict[str, Any]:
@@ -437,7 +676,7 @@ def graph_status() -> dict[str, Any]:
         "enabled": True,
         "backend": "simple_state_machine",
         "langgraph_installed": find_spec("langgraph") is not None,
-        "nodes": [START, "Intent Detection", "Tool Selection", "Tool Execution", "Evidence Collection", "Response Generation", END],
+        "nodes": [START, "Load Context", "Intent Detection", "Context Extraction", "Context Merge", "Resolve Customer", "Required Fields", "Next Best Question", "Tool Selection", "Tool Execution", "Evidence Collection", "Response Generation", "Save Context", END],
     }
 
 

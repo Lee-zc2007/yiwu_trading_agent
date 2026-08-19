@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api.routes import agent_router, customers_router, demo_router, knowledge_router, risk_router, system_router, transactions_router
+from .api.routes import agent_router, customers_router, decisions_router, knowledge_router, risk_router, system_router, transactions_router
 from .core.config import settings
 from .core.database import Base, SessionLocal, engine, ensure_vector_index, initialize_vector_support
 from .core.logging import configure_logging
@@ -36,7 +36,7 @@ app = FastAPI(
 )
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-for router in [system_router, customers_router, transactions_router, risk_router, knowledge_router, agent_router, demo_router]:
+for router in [system_router, customers_router, transactions_router, risk_router, decisions_router, knowledge_router, agent_router]:
     app.include_router(router)
 
 

@@ -5,7 +5,7 @@ from .builtin import RULE_CLASSES
 
 
 class RiskRuleEngine:
-    version = "rules_v1"
+    version = "rules_v2"
 
     def __init__(self, db: Session, merchant_id: int):
         self.db = db

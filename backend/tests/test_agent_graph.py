@@ -2,6 +2,7 @@
 
 import json
 
+import httpx
 import pytest
 
 from backend.app.agent.graph import AgentDecisionGraph, graph_status
@@ -122,7 +123,8 @@ def test_llm_mode_reuses_tool_results_to_return_graph_trace(client, monkeypatch)
                         "function": {"name": "get_customer_credit_score", "arguments": '{"customer_id": 5}'},
                     }],
                 }
-            tool_payload = json.loads(messages[-1]["content"])
+            tool_message = next(item for item in reversed(messages) if item.get("role") == "tool")
+            tool_payload = json.loads(tool_message["content"])
             score = tool_payload["data"]["total_score"]
             return {"role": "assistant", "content": f"根据系统信用评分工具，该客户信用分为 {score:.1f} 分。"}
 
@@ -141,3 +143,127 @@ def test_llm_mode_reuses_tool_results_to_return_graph_trace(client, monkeypatch)
     assert response.call_chain[-1].node == "END"
     assert len(response.state_history) == len(response.call_chain)
     assert "信用分为" in response.answer
+
+
+def test_llm_failure_is_reported_without_mock_answer(client, monkeypatch):
+    class TimeoutProvider:
+        provider_name = "deepseek"
+
+        def complete(self, messages, tools=None):
+            raise httpx.ReadTimeout("test timeout")
+
+    monkeypatch.setattr(settings, "agent_mode", "llm")
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    with SessionLocal() as db:
+        response = AgentService(
+            SqlAlchemyAgentDataGateway(db, merchant_id=1),
+            merchant_id=1,
+            provider=TimeoutProvider(),
+        ).chat("查询信用情况", 5, "pytest-llm-timeout")
+
+    assert response.mode == "llm-error:timeout"
+    assert response.insufficient_data is True
+    assert "没有生成本地替代回答" in response.answer
+    assert "Mock Agent" not in response.answer
+
+
+def test_llm_without_tool_call_is_retried_then_rejected(client, monkeypatch):
+    class NoToolProvider:
+        provider_name = "deepseek"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, tools=None):
+            self.calls += 1
+            return {"role": "assistant", "content": "我直接回答。"}
+
+    provider = NoToolProvider()
+    monkeypatch.setattr(settings, "agent_mode", "llm")
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    with SessionLocal() as db:
+        response = AgentService(
+            SqlAlchemyAgentDataGateway(db, merchant_id=1),
+            merchant_id=1,
+            provider=provider,
+        ).chat("查询信用情况", 5, "pytest-llm-no-tool")
+
+    assert provider.calls == 2
+    assert response.mode == "llm-error:no-tool"
+    assert response.insufficient_data is True
+    assert response.tools_used == []
+    assert "没有生成本地替代回答" in response.answer
+
+
+def test_llm_internal_tool_markup_is_corrected_before_return(client, monkeypatch):
+    class MarkupProvider:
+        provider_name = "deepseek"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, tools=None):
+            self.calls += 1
+            if tools:
+                return {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call-credit-markup",
+                        "type": "function",
+                        "function": {"name": "get_customer_credit_score", "arguments": '{"customer_id": 5}'},
+                    }],
+                }
+            if self.calls == 2:
+                return {"role": "assistant", "content": '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="unknown">'}
+            return {"role": "assistant", "content": "根据已返回的信用评分证据，该客户信用情况已完成核验。"}
+
+    provider = MarkupProvider()
+    monkeypatch.setattr(settings, "agent_mode", "llm")
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    with SessionLocal() as db:
+        response = AgentService(
+            SqlAlchemyAgentDataGateway(db, merchant_id=1),
+            merchant_id=1,
+            provider=provider,
+        ).chat("查询信用情况", 5, "pytest-llm-markup")
+
+    assert provider.calls == 3
+    assert response.mode == "llm:deepseek"
+    assert response.tools_used == ["get_customer_credit_score"]
+    assert "DSML" not in response.answer
+    assert "完成核验" in response.answer
+
+
+def test_transaction_decision_answer_is_also_generated_by_llm(client, monkeypatch):
+    class DecisionProvider:
+        provider_name = "deepseek"
+
+        def complete(self, messages, tools=None):
+            assert tools is None
+            assert any("确定性状态机" in str(item.get("content") or "") for item in messages)
+            return {
+                "role": "assistant",
+                "content": "我已通过受控风控流程记录订单条件。请补充这笔订单计划支付的定金比例。",
+            }
+
+    monkeypatch.setattr(settings, "agent_mode", "llm")
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    with SessionLocal() as db:
+        response = AgentService(
+            SqlAlchemyAgentDataGateway(db, merchant_id=1),
+            merchant_id=1,
+            provider=DecisionProvider(),
+        ).chat(
+            "一个迪拜客户第一次合作，准备做3万美元订单，希望给45天账期。",
+            None,
+            "pytest-llm-decision",
+        )
+
+    assert response.mode == "llm:deepseek"
+    assert response.intent == "transaction_decision"
+    assert "deposit_ratio" in response.missing_fields
+    assert "定金比例" in response.answer
+    response_generation = next(item for item in response.call_chain if item.node == "Response Generation")
+    assert response_generation.detail["source"] == "deepseek_from_deterministic_tools"
+    assert response.state_history[-1].final_answer == response.answer

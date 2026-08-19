@@ -1,4 +1,23 @@
-from .entities import AgentConversation, AgentMessage, AuditLog, CreditScoreHistory, Customer, KnowledgeBase, Merchant, RiskEvent, RiskRuleConfig, Transaction
+from .entities import (
+    AgentConversation,
+    AgentDecisionContext,
+    AgentMessage,
+    AuditLog,
+    CreditScoreHistory,
+    Customer,
+    CustomerTrustSnapshot,
+    KnowledgeBase,
+    Merchant,
+    RiskEvent,
+    RiskRuleConfig,
+    Transaction,
+    TransactionDecisionSnapshot,
+    TransactionEvidenceItem,
+    TransactionEvidencePackage,
+    TransactionMitigation,
+    TransactionTerm,
+    TransactionTimelineEvent,
+)
 
 __all__ = [
     "Merchant",
@@ -11,4 +30,12 @@ __all__ = [
     "AgentConversation",
     "AgentMessage",
     "KnowledgeBase",
+    "TransactionTerm",
+    "TransactionTimelineEvent",
+    "TransactionEvidenceItem",
+    "TransactionMitigation",
+    "CustomerTrustSnapshot",
+    "AgentDecisionContext",
+    "TransactionDecisionSnapshot",
+    "TransactionEvidencePackage",
 ]

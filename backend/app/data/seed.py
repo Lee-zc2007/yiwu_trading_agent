@@ -21,6 +21,14 @@ RULE_CONFIGS = [
     ("SPLIT_ORDERS", "疑似拆单规避审核", {"audit_threshold": 50000, "near_ratio": 0.75, "min_orders": 3}, "critical"),
     ("CONSECUTIVE_ADVERSE", "连续逾期、退款或纠纷", {"consecutive": 3}, "high"),
     ("NEW_CUSTOMER_LARGE_ORDER", "新客户首单金额过高", {"amount": 20000}, "high"),
+    ("FIRST_CREDIT_EXPOSURE", "首次合作即产生授信敞口", {}, "high"),
+    ("LOW_DEPOSIT_RATIO", "定金比例偏低", {"minimum": 0.3}, "medium"),
+    ("LONG_CREDIT_TERM", "账期较长", {"days": 45}, "high"),
+    ("CREDIT_TERM_EXTENSION", "账期较历史水平明显延长", {"extension_days": 15}, "high"),
+    ("DEFERRED_FINAL_PAYMENT", "尾款延后至发货或交付后", {}, "medium"),
+    ("PAYER_CONTRACT_MISMATCH", "付款主体与合同主体不一致", {}, "critical"),
+    ("PAYMENT_ACCOUNT_CHANGE", "付款账户发生变化", {}, "high"),
+    ("AMOUNT_ABOVE_HISTORICAL_MAX", "订单金额超过历史最大订单", {"multiple": 1.25}, "high"),
 ]
 
 COMPANIES = [
@@ -40,13 +48,19 @@ PAYMENTS = ["T/T 30/70", "T/T 50/50", "Letter of Credit"]
 
 
 def seed_demo_data(db: Session) -> None:
-    if db.query(Merchant).count() > 0:
-        return
     rng = random.Random(42)
-    merchant = Merchant(name="义乌远航贸易示范商户", contact="demo@tradeguard.local")
-    db.add(merchant); db.flush()
+    merchant = db.query(Merchant).order_by(Merchant.id).first()
+    if merchant is None:
+        merchant = Merchant(name="义乌远航贸易示范商户", contact="demo@tradeguard.local")
+        db.add(merchant)
+        db.flush()
     for code, name, thresholds, severity in RULE_CONFIGS:
-        db.add(RiskRuleConfig(rule_code=code, rule_name=name, threshold_config=thresholds, severity=severity, version="rules_v1"))
+        if db.query(RiskRuleConfig).filter(RiskRuleConfig.rule_code == code).first() is None:
+            db.add(RiskRuleConfig(rule_code=code, rule_name=name, threshold_config=thresholds, severity=severity, version="rules_v2"))
+    db.flush()
+    if db.query(Customer).filter(Customer.merchant_id == merchant.id).count() > 0:
+        db.commit()
+        return
 
     today = datetime.now(UTC).replace(tzinfo=None, hour=10, minute=0, second=0, microsecond=0)
     customers: list[Customer] = []

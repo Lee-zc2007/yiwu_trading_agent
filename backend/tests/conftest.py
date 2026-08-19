@@ -10,7 +10,7 @@ TEST_DATABASE = PROJECT_ROOT / "tradeguard_test.db"
 if TEST_DATABASE.exists():
     TEST_DATABASE.unlink()
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE.as_posix()}"
-os.environ["AGENT_MODE"] = "mock"
+os.environ["AGENT_MODE"] = "deterministic"
 
 from backend.app.core.database import engine  # noqa: E402
 from backend.app.main import app  # noqa: E402

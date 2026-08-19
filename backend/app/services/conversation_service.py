@@ -12,7 +12,7 @@ from uuid import uuid4
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..models import AgentConversation, AgentMessage
+from ..models import AgentConversation, AgentDecisionContext, AgentMessage
 from ..models.entities import utc_now
 from ..schemas.agent import ConversationMessage, ConversationResponse, ConversationSummary
 
@@ -35,6 +35,7 @@ SAFE_TOOL_ARGUMENTS = {
     "customer_id_a",
     "customer_id_b",
     "order_id",
+    "transaction_id",
     "event_id",
     "limit",
 }
@@ -224,6 +225,11 @@ class ConversationService:
         conversation = self._conversation(merchant_id, conversation_id)
         if not conversation:
             return False
+        self.db.query(AgentDecisionContext).filter(
+            AgentDecisionContext.merchant_id == merchant_id,
+            AgentDecisionContext.user_id == self.user_id,
+            AgentDecisionContext.conversation_id == conversation_id,
+        ).delete(synchronize_session=False)
         self.db.delete(conversation)
         self.db.flush()
         return True

@@ -15,6 +15,7 @@ from ...schemas.agent import (
 from ...schemas.common import ApiResponse
 from ...services.agent_data import SqlAlchemyAgentDataGateway
 from ...services.conversation_service import ConversationService
+from ...services.decision_context import DecisionContextService
 from ..dependencies import get_merchant_id, get_user_id
 
 
@@ -32,7 +33,12 @@ def chat(
 
     gateway = SqlAlchemyAgentDataGateway(db, merchant_id)
     memory = ConversationService(db, user_id)
-    response = AgentService(gateway=gateway, merchant_id=merchant_id, conversations=memory).chat(
+    response = AgentService(
+        gateway=gateway,
+        merchant_id=merchant_id,
+        conversations=memory,
+        decision_contexts=DecisionContextService(db, user_id),
+    ).chat(
         message=payload.message,
         customer_id=payload.customer_id,
         conversation_id=payload.conversation_id,

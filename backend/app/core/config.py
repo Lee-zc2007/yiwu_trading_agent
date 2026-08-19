@@ -16,10 +16,12 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "dev-only-change-me"
     default_merchant_id: int = 1
-    agent_mode: str = "mock"
+    agent_mode: str = "llm"
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4.1-mini"
+    llm_timeout_seconds: float = 60
+    llm_max_retries: int = 2
     # 知识库 Embedding 与对话 LLM 独立配置。默认本地哈希向量可离线路演；
     # 生产环境可切换到 OpenAI-compatible Embedding API。
     embedding_provider: str = "local-hash"
@@ -31,7 +33,6 @@ class Settings(BaseSettings):
     knowledge_chunk_overlap: int = 80
     knowledge_top_k: int = 5
     knowledge_min_similarity: float = 0.05
-    roadshow_demo_enabled: bool = True
     cors_origins: str = "http://localhost:3000"
     max_upload_mb: int = 8
 

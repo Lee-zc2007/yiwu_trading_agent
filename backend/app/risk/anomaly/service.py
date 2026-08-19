@@ -45,4 +45,25 @@ class AnomalyService:
             model_result = model_registry.predict_one(features)
         except Exception as exc:
             model_result = {"anomaly_score": statistical, "raw_score": statistical, "model_version": "statistical_fallback_v1", "model_status": f"fallback:{type(exc).__name__}"}
-        return {"features": features, "statistical_anomaly_score": statistical, **model_result}
+        anomaly_score = float(model_result.get("anomaly_score", statistical))
+        deviations = [
+            {"feature": name, "value": round(float(features[name]), 4)}
+            for name in [
+                "amount_to_history_mean",
+                "amount_zscore",
+                "payment_method_changed",
+                "category_changed",
+            ]
+            if abs(float(features.get(name, 0))) >= (1.5 if name == "amount_to_history_mean" else 1)
+        ]
+        detected = anomaly_score >= 0.7
+        return {
+            "features": features,
+            "statistical_anomaly_score": statistical,
+            **model_result,
+            "anomaly_detected": detected,
+            "anomaly_score": anomaly_score,
+            "feature_deviations": deviations,
+            "explanation": "行为模式明显偏离历史，需要进一步核验" if detected else "未发现足以单独升级风险等级的行为异常信号",
+            "signal_role": "auxiliary_only",
+        }

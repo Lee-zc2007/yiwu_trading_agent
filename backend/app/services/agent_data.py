@@ -10,8 +10,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..core.security import mask_email, mask_phone
-from ..models import Customer, RiskEvent, Transaction
+from ..models import Customer, RiskEvent, Transaction, TransactionTimelineEvent
 from ..repositories.customers import CustomerRepository
+from ..risk.decision import TransactionDecisionService
+from ..risk.methodology import RiskEvaluationCriteriaService
 from ..risk.service import RiskAssessmentService
 from .knowledge_base import KnowledgeBaseService
 
@@ -237,6 +239,78 @@ class SqlAlchemyAgentDataGateway:
         """查询非结构化知识；与上面的客户、交易 SQL 查询保持物理边界。"""
 
         return KnowledgeBaseService(self.db).search(query=query, category=category, limit=limit)
+
+    def get_risk_evaluation_criteria(self) -> dict:
+        """读取当前生效的系统评价标准；不计算任何具体客户或交易风险。"""
+
+        return RiskEvaluationCriteriaService(self.db).get()
+
+    def _decision_scope(self, customer_id: int | None, transaction_id: int | None):
+        transaction = None
+        customer = None
+        if transaction_id is not None:
+            transaction = self.db.query(Transaction).filter(
+                Transaction.id == transaction_id,
+                Transaction.merchant_id == self.merchant_id,
+            ).first()
+            if transaction is None:
+                raise LookupError("交易不存在或不属于当前商户")
+            customer = transaction.customer
+            if customer_id is not None and customer.id != customer_id:
+                raise LookupError("客户与交易不匹配")
+        elif customer_id is not None:
+            customer = self.customers.get(customer_id)
+            if customer is None:
+                raise LookupError("外商不存在或不属于当前商户")
+        return customer, transaction
+
+    def evaluate_transaction_decision(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict:
+        """调用统一确定性决策服务；不持久化快照，不修改交易。"""
+
+        customer, transaction = self._decision_scope(customer_id, transaction_id)
+        return TransactionDecisionService(self.db, self.merchant_id).evaluate(
+            transaction_context=transaction_context,
+            customer=customer,
+            transaction=transaction,
+            persist_snapshot=False,
+        )
+
+    def get_transaction_risk(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict:
+        return self.evaluate_transaction_decision(transaction_context, customer_id, transaction_id)["transaction_risk"]
+
+    def calculate_risk_exposure(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict:
+        return self.evaluate_transaction_decision(transaction_context, customer_id, transaction_id)["risk_exposure"]
+
+    def get_evidence_completeness(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict:
+        return self.evaluate_transaction_decision(transaction_context, customer_id, transaction_id)["evidence"]
+
+    def evaluate_credit_terms(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict:
+        return self.evaluate_transaction_decision(transaction_context, customer_id, transaction_id)
+
+    def simulate_transaction_adjustment(self, base_context: dict, adjustments: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict:
+        customer, transaction = self._decision_scope(customer_id, transaction_id)
+        return TransactionDecisionService(self.db, self.merchant_id).simulate(
+            base_context=base_context,
+            adjustments=adjustments,
+            customer=customer,
+            transaction=transaction,
+        )
+
+    def get_transaction_timeline(self, transaction_id: int) -> dict | None:
+        transaction = self.db.query(Transaction).filter(
+            Transaction.id == transaction_id,
+            Transaction.merchant_id == self.merchant_id,
+        ).first()
+        if transaction is None:
+            return None
+        rows = self.db.query(TransactionTimelineEvent).filter(
+            TransactionTimelineEvent.transaction_id == transaction_id,
+            TransactionTimelineEvent.merchant_id == self.merchant_id,
+        ).order_by(TransactionTimelineEvent.event_time).all()
+        return {
+            "transaction_id": transaction_id,
+            "items": [model_dict(item) for item in rows],
+        }
 
     @staticmethod
     def _transaction_dto(item: Transaction) -> dict:

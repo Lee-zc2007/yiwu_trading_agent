@@ -111,4 +111,134 @@ class NewCustomerLargeOrderRule(RiskRule):
         return self.result("新客户缺少历史履约证据且首单金额较高", {"current_amount": order["amount"], "threshold": threshold}, 85) if not history and order["amount"] >= threshold else None
 
 
-RULE_CLASSES = [AmountSurgeRule, AmountZScoreRule, SmallToLargeRule, HighFrequencyRule, PaymentChangedRule, CountryChangedRule, AddressChangedRule, CategoryChangedRule, ProfileChangeLargeOrderRule, SplitOrdersRule, ConsecutiveAdverseRule, NewCustomerLargeOrderRule]
+class FirstCreditExposureRule(RiskRule):
+    rule_code, name = "FIRST_CREDIT_EXPOSURE", "首次合作即产生授信敞口"
+    def evaluate(self, customer, order, history):
+        credit_days = int(order.get("credit_days") or 0)
+        deposit_ratio = float(order.get("deposit_ratio") or 0)
+        exposure = max(0, float(order.get("amount") or 0) * (1 - deposit_ratio))
+        if not history and (credit_days > 0 or exposure > 0):
+            return self.result(
+                "客户缺少历史履约记录，本次交易将产生首次授信敞口",
+                {"credit_days": credit_days, "deposit_ratio": deposit_ratio, "projected_unpaid_amount": round(exposure, 2)},
+            )
+        return None
+
+
+class LowDepositRatioRule(RiskRule):
+    rule_code, name = "LOW_DEPOSIT_RATIO", "定金比例偏低"
+    def evaluate(self, customer, order, history):
+        ratio = order.get("deposit_ratio")
+        threshold = float(self.config.get("minimum", 0.3))
+        if ratio is not None and float(ratio) < threshold:
+            return self.result(
+                f"当前定金比例 {float(ratio):.0%}，低于规则阈值 {threshold:.0%}",
+                {"deposit_ratio": float(ratio), "minimum_deposit_ratio": threshold},
+            )
+        return None
+
+
+class LongCreditTermRule(RiskRule):
+    rule_code, name = "LONG_CREDIT_TERM", "账期较长"
+    def evaluate(self, customer, order, history):
+        credit_days = int(order.get("credit_days") or 0)
+        threshold = int(self.config.get("days", 45))
+        return self.result(
+            f"本次账期为 {credit_days} 天，达到长账期阈值",
+            {"credit_days": credit_days, "threshold_days": threshold},
+        ) if credit_days >= threshold else None
+
+
+def _historical_credit_days(transaction) -> int | None:
+    if getattr(transaction, "terms", None) and transaction.terms.credit_days is not None:
+        return transaction.terms.credit_days
+    method = (getattr(transaction, "payment_method", "") or "").lower()
+    for days in (120, 90, 60, 45, 30, 15):
+        if str(days) in method and ("open account" in method or "days" in method or "天" in method):
+            return days
+    return None
+
+
+class CreditTermExtensionRule(RiskRule):
+    rule_code, name = "CREDIT_TERM_EXTENSION", "账期较历史水平明显延长"
+    def evaluate(self, customer, order, history):
+        current = order.get("credit_days")
+        historical = [days for days in (_historical_credit_days(tx) for tx in history[-10:]) if days is not None]
+        if current is None or not historical:
+            return None
+        baseline = max(historical)
+        extension = int(current) - baseline
+        threshold = int(self.config.get("extension_days", 15))
+        return self.result(
+            f"账期从历史最长 {baseline} 天延长到 {int(current)} 天",
+            {"historical_max_credit_days": baseline, "current_credit_days": int(current), "extension_days": extension},
+        ) if extension >= threshold else None
+
+
+class DeferredFinalPaymentRule(RiskRule):
+    rule_code, name = "DEFERRED_FINAL_PAYMENT", "尾款延后至发货或交付后"
+    def evaluate(self, customer, order, history):
+        due_type = str(order.get("final_payment_due_type") or "").upper()
+        deferred_types = set(self.config.get("due_types", ["AFTER_SHIPMENT", "ON_DELIVERY", "AFTER_DELIVERY", "CREDIT_TERM"]))
+        return self.result(
+            "尾款支付节点位于发货或交付后，将增加未收款货值敞口",
+            {"final_payment_due_type": due_type},
+        ) if due_type in deferred_types else None
+
+
+class PayerContractMismatchRule(RiskRule):
+    rule_code, name = "PAYER_CONTRACT_MISMATCH", "付款主体与合同主体不一致"
+    def evaluate(self, customer, order, history):
+        return self.result(
+            "付款主体与合同约定主体不一致，需要核验第三方付款授权与资金来源",
+            {"payer_matches_contract": False},
+        ) if order.get("payer_matches_contract") is False else None
+
+
+class PaymentAccountChangeRule(RiskRule):
+    rule_code, name = "PAYMENT_ACCOUNT_CHANGE", "付款账户发生变化"
+    def evaluate(self, customer, order, history):
+        changed = order.get("payment_account_changed") is True
+        verified = order.get("payment_account_verified") is True
+        return self.result(
+            "付款账户已变更且尚未完成独立核验",
+            {"payment_account_changed": changed, "payment_account_verified": verified},
+        ) if changed and not verified else None
+
+
+class AmountAboveHistoricalMaxRule(RiskRule):
+    rule_code, name = "AMOUNT_ABOVE_HISTORICAL_MAX", "订单金额超过历史最大订单"
+    def evaluate(self, customer, order, history):
+        if not history:
+            return None
+        historical_max = max(tx.amount for tx in history)
+        ratio = float(order.get("amount") or 0) / max(historical_max, 1)
+        threshold = float(self.config.get("multiple", 1.25))
+        return self.result(
+            f"本次订单为历史最大订单的 {ratio:.1f} 倍",
+            {"current_amount": order.get("amount"), "historical_max": round(historical_max, 2), "multiple": round(ratio, 2), "threshold": threshold},
+        ) if ratio >= threshold else None
+
+
+RULE_CLASSES = [
+    AmountSurgeRule,
+    AmountZScoreRule,
+    SmallToLargeRule,
+    HighFrequencyRule,
+    PaymentChangedRule,
+    CountryChangedRule,
+    AddressChangedRule,
+    CategoryChangedRule,
+    ProfileChangeLargeOrderRule,
+    SplitOrdersRule,
+    ConsecutiveAdverseRule,
+    NewCustomerLargeOrderRule,
+    FirstCreditExposureRule,
+    LowDepositRatioRule,
+    LongCreditTermRule,
+    CreditTermExtensionRule,
+    DeferredFinalPaymentRule,
+    PayerContractMismatchRule,
+    PaymentAccountChangeRule,
+    AmountAboveHistoricalMaxRule,
+]

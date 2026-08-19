@@ -72,6 +72,107 @@ class Transaction(Base, TimestampMixin):
     shipping_address: Mapped[str] = mapped_column(String(300))
 
     customer: Mapped[Customer] = relationship(back_populates="transactions")
+    terms: Mapped["TransactionTerm | None"] = relationship(
+        back_populates="transaction", cascade="all, delete-orphan", uselist=False
+    )
+    timeline_events: Mapped[list["TransactionTimelineEvent"]] = relationship(
+        back_populates="transaction", cascade="all, delete-orphan"
+    )
+    evidence_items: Mapped[list["TransactionEvidenceItem"]] = relationship(
+        back_populates="transaction", cascade="all, delete-orphan"
+    )
+    mitigations: Mapped[list["TransactionMitigation"]] = relationship(
+        back_populates="transaction", cascade="all, delete-orphan"
+    )
+
+
+class TransactionTerm(Base, TimestampMixin):
+    """交易合同与授信条款。
+
+    ``transactions.deposit_ratio`` 暂时保留以兼容旧接口；新决策链优先读取本表，
+    没有条款记录时再回退旧字段。这样可以渐进迁移而不破坏现有 MVP。
+    """
+
+    __tablename__ = "transaction_terms"
+    __table_args__ = (UniqueConstraint("transaction_id", name="uq_transaction_terms_transaction"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id", ondelete="CASCADE"), index=True)
+    credit_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payment_due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deposit_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    deposit_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_payment_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_payment_due_type: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    contract_signed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    payer_matches_contract: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    payment_account_changed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    payment_account_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    planned_shipping_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    planned_payment_before_shipping: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    transaction: Mapped[Transaction] = relationship(back_populates="terms")
+
+
+class TransactionTimelineEvent(Base):
+    """付款、发货、交付、到期、延期、纠纷等可验证交易时间线。"""
+
+    __tablename__ = "transaction_timeline_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id", ondelete="CASCADE"), index=True)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    event_time: Mapped[datetime] = mapped_column(DateTime, index=True)
+    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str] = mapped_column(String(12), default="USD")
+    description: Mapped[str] = mapped_column(Text, default="")
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    transaction: Mapped[Transaction] = relationship(back_populates="timeline_events")
+
+
+class TransactionEvidenceItem(Base):
+    """交易证据元数据；文件只保存受控引用和摘要，不保存敏感原文。"""
+
+    __tablename__ = "transaction_evidence_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id", ondelete="CASCADE"), index=True)
+    evidence_type: Mapped[str] = mapped_column(String(60), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    file_reference: Mapped[str] = mapped_column(String(500), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    checksum: Mapped[str] = mapped_column(String(128), default="")
+    collected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    transaction: Mapped[Transaction] = relationship(back_populates="evidence_items")
+
+
+class TransactionMitigation(Base):
+    """保险、担保、信用证等风险缓释；只有 verified 项可抵扣敞口。"""
+
+    __tablename__ = "transaction_mitigations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id", ondelete="CASCADE"), index=True)
+    mitigation_type: Mapped[str] = mapped_column(String(60), index=True)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    coverage_amount: Mapped[float] = mapped_column(Float, default=0)
+    currency: Mapped[str] = mapped_column(String(12), default="USD")
+    valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    valid_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    transaction: Mapped[Transaction] = relationship(back_populates="mitigations")
 
 
 class CreditScoreHistory(Base):
@@ -89,6 +190,31 @@ class CreditScoreHistory(Base):
     confidence_level: Mapped[str] = mapped_column(String(40))
     rule_version: Mapped[str] = mapped_column(String(40), default="credit_v1")
     calculated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class CustomerTrustSnapshot(Base):
+    """Customer Trust v2 的确定性计算快照。"""
+
+    __tablename__ = "customer_trust_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    transaction_count: Mapped[int] = mapped_column(Integer, default=0)
+    cooperation_days: Mapped[int] = mapped_column(Integer, default=0)
+    total_amount: Mapped[float] = mapped_column(Float, default=0)
+    max_order_amount: Mapped[float] = mapped_column(Float, default=0)
+    on_time_payment_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    overdue_count: Mapped[int] = mapped_column(Integer, default=0)
+    average_overdue_days: Mapped[float | None] = mapped_column(Float, nullable=True)
+    refund_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dispute_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rejection_count: Mapped[int] = mapped_column(Integer, default=0)
+    trust_level: Mapped[str] = mapped_column(String(40), default="developing", index=True)
+    confidence_level: Mapped[str] = mapped_column(String(40), default="low")
+    missing_fields: Mapped[list] = mapped_column(JSON, default=list)
+    calculation_version: Mapped[str] = mapped_column(String(40), default="customer_trust_v2")
+    calculated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
 
 class RiskRuleConfig(Base):
@@ -172,6 +298,57 @@ class AgentMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
     conversation: Mapped[AgentConversation] = relationship(back_populates="messages")
+
+
+class AgentDecisionContext(Base, TimestampMixin):
+    """与聊天记录分离的结构化多轮交易决策上下文。"""
+
+    __tablename__ = "agent_decision_contexts"
+    __table_args__ = (
+        UniqueConstraint("merchant_id", "user_id", "conversation_id", name="uq_agent_decision_context_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    user_id: Mapped[str] = mapped_column(String(120), index=True)
+    conversation_id: Mapped[str] = mapped_column(String(120), index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
+    transaction_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id"), nullable=True, index=True)
+    context_version: Mapped[int] = mapped_column(Integer, default=1)
+    transaction_context: Mapped[dict] = mapped_column(JSON, default=dict)
+    required_fields: Mapped[list] = mapped_column(JSON, default=list)
+    missing_fields: Mapped[list] = mapped_column(JSON, default=list)
+    information_completeness: Mapped[float] = mapped_column(Float, default=0)
+    next_best_question: Mapped[str] = mapped_column(Text, default="")
+
+
+class TransactionDecisionSnapshot(Base):
+    """一次确定性交易决策的不可变快照，供审计和证据包复用。"""
+
+    __tablename__ = "transaction_decision_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
+    transaction_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id"), nullable=True, index=True)
+    decision_status: Mapped[str] = mapped_column(String(60), index=True)
+    decision_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    calculation_version: Mapped[str] = mapped_column(String(40), default="transaction_decision_v1")
+    calculated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+
+class TransactionEvidencePackage(Base):
+    """交易证据包的结构化 JSON 与可选 HTML 快照。"""
+
+    __tablename__ = "transaction_evidence_packages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id", ondelete="CASCADE"), index=True)
+    package_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    html_content: Mapped[str] = mapped_column(Text, default="")
+    checksum: Mapped[str] = mapped_column(String(128), default="")
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
 
 class KnowledgeBase(Base):

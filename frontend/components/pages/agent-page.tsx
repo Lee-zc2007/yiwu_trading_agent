@@ -11,17 +11,18 @@ import {
   LoaderCircle,
   MessageSquareText,
   Plus,
-  Scale,
   Search,
   Send,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UserRound,
-  Users,
   Workflow,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { AgentAnalysisPanel } from '@/components/agent/analysis-panel'
+import { AgentMarkdown } from '@/components/agent/agent-markdown'
 import { PageHeader } from '@/components/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -54,7 +55,7 @@ type ChatPayload = {
 const WELCOME_MESSAGE: ChatMessage = {
   key: 'welcome',
   role: 'assistant',
-  content: '风控助手已就绪。请选择外商并提出业务问题，我会调用客户档案、信用评分、订单规则与异常检测服务形成可追溯结论。',
+  content: '交易授信助手已就绪。你可以直接描述订单金额、定金和账期；我会逐项补齐关键信息，再调用确定性风控服务计算敞口、证据完整度与建议交易条件。',
 }
 
 function historyMessages(history: ConversationHistory): ChatMessage[] {
@@ -75,8 +76,8 @@ function latestHistoricalCalls(history: ConversationHistory | undefined): Conver
 
 export function AgentPage() {
   const queryClient = useQueryClient()
-  const [customerId, setCustomerId] = useState('5')
-  const [input, setInput] = useState('为什么这个客户风险高？')
+  const [customerId, setCustomerId] = useState('')
+  const [input, setInput] = useState('一个迪拜客户第一次合作，准备做3万美元订单，希望给45天账期。')
   const [selectedConversationId, setSelectedConversationId] = useState<string | null | undefined>(undefined)
   const [draftMessages, setDraftMessages] = useState<ChatMessage[]>([])
   const [lastResponse, setLastResponse] = useState<AgentResponse | null>(null)
@@ -143,8 +144,24 @@ export function AgentPage() {
     },
   })
 
+  const deleteConversation = useMutation({
+    mutationFn: (conversationId: string) => api<{ conversation_id: string }>(`/api/agent/conversations/${conversationId}`, {
+      method: 'DELETE',
+    }),
+    onSuccess: (_, deletedId) => {
+      queryClient.removeQueries({ queryKey: ['agent-history', deletedId] })
+      queryClient.invalidateQueries({ queryKey: ['agent-conversations'] })
+      if (deletedId === activeConversationId) {
+        setSelectedConversationId(null)
+        setDraftMessages([])
+        setLastResponse(null)
+      }
+      toast.success('历史会话及其决策上下文已删除')
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
+
   const selectedCustomer = customers.data?.items.find((item) => String(item.id) === customerId)
-  const comparisonCustomer = customers.data?.items.find((item) => String(item.id) !== customerId)
   const historicalCalls = useMemo(() => latestHistoricalCalls(history.data), [history.data])
 
   const submit = (message = input, customerOverride?: number | null) => {
@@ -164,7 +181,7 @@ export function AgentPage() {
     setSelectedConversationId(null)
     setDraftMessages([])
     setLastResponse(null)
-    setInput('为什么这个客户风险高？')
+    setInput('一个迪拜客户第一次合作，准备做3万美元订单，希望给45天账期。')
   }
 
   const selectConversation = (conversationId: string) => {
@@ -176,26 +193,42 @@ export function AgentPage() {
     setDraftMessages([])
   }
 
+  const requestDeleteConversation = (conversationId: string, title: string) => {
+    if (chat.isPending || deleteConversation.isPending) return
+    if (!window.confirm(`确定删除历史会话“${title || '未命名会话'}”吗？此操作无法撤销。`)) return
+    deleteConversation.mutate(conversationId)
+  }
+
   const quickQuestions = [
     {
-      label: '为什么这个客户风险高？',
+      label: '这笔订单账能放吗？',
       icon: Search,
-      action: () => submit('为什么这个客户风险高？'),
+      action: () => submit('这笔订单账能放吗？'),
     },
     {
-      label: '查看最近高风险客户',
-      icon: Users,
-      action: () => submit('查看最近高风险客户', null),
-    },
-    {
-      label: '比较两个客户',
-      icon: Scale,
-      action: () => submit(`比较客户 ${customerId || '5'} 和 ${comparisonCustomer?.id || '7'}`),
-    },
-    {
-      label: '生成调查清单',
+      label: '还缺哪些关键信息？',
       icon: ClipboardCheck,
-      action: () => submit('生成调查清单'),
+      action: () => submit('还缺哪些关键信息？'),
+    },
+    {
+      label: '为什么当前风险敞口这么高？',
+      icon: Search,
+      action: () => submit('为什么当前风险敞口这么高？'),
+    },
+    {
+      label: '如果定金提高到40%呢？',
+      icon: Sparkles,
+      action: () => submit('如果定金提高到40%呢？'),
+    },
+    {
+      label: '如果把账期缩短到30天呢？',
+      icon: Clock3,
+      action: () => submit('如果把账期缩短到30天呢？'),
+    },
+    {
+      label: '生成交易核验清单',
+      icon: ClipboardCheck,
+      action: () => submit('生成交易核验清单'),
     },
   ]
 
@@ -203,12 +236,12 @@ export function AgentPage() {
     <div>
       <PageHeader
         eyebrow="AI RISK OPERATIONS DESK"
-        title="企业 AI 风控助手"
-        description="以业务系统数据为依据，自动编排信用评分、规则引擎与异常检测；每条结论均保留工具调用链和风险证据。"
+        title="企业交易授信与风控助手"
+        description="先补齐交易 Context，再编排客户可信度、交易规则、风险敞口、证据与授信条件；每条结论均可回溯。"
         actions={(
           <div className="flex items-center gap-2">
             <Badge tone="success" className="rounded-md">受控只读工具</Badge>
-            <Badge className="rounded-md">{lastResponse?.mode || 'STATE MACHINE READY'}</Badge>
+            <Badge className="rounded-md">{lastResponse?.mode || 'DEEPSEEK FIRST'}</Badge>
           </div>
         )}
       />
@@ -237,12 +270,15 @@ export function AgentPage() {
                 {conversations.data.map((conversation) => {
                   const active = activeConversationId === conversation.conversation_id
                   return (
-                    <button
+                    <div
                       key={conversation.conversation_id}
-                      onClick={() => selectConversation(conversation.conversation_id)}
-                      className={`group relative w-full px-3 py-3 text-left transition ${active ? 'bg-teal-50/80' : 'hover:bg-slate-50'}`}
+                      className={`group relative transition ${active ? 'bg-teal-50/80' : 'hover:bg-slate-50'}`}
                     >
                       {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-teal-600" />}
+                      <button
+                        onClick={() => selectConversation(conversation.conversation_id)}
+                        className="w-full px-3 py-3 pr-9 text-left"
+                      >
                       <div className="flex items-start gap-2">
                         <span className={`mt-0.5 grid size-6 shrink-0 place-items-center border ${active ? 'border-teal-200 bg-white text-teal-700' : 'border-slate-200 bg-slate-50 text-slate-400'}`}>
                           <MessageSquareText size={12} />
@@ -255,9 +291,21 @@ export function AgentPage() {
                           </div>
                           {conversation.customer_id && <span className="mt-1.5 inline-block bg-slate-100 px-1.5 py-0.5 text-[7px] text-slate-500">客户 #{conversation.customer_id}</span>}
                         </div>
-                        <ChevronRight size={12} className="mt-1 text-slate-300 group-hover:text-teal-600" />
                       </div>
-                    </button>
+                      </button>
+                      <button
+                        type="button"
+                        title="删除历史会话"
+                        aria-label={`删除会话 ${conversation.title || '未命名会话'}`}
+                        onClick={() => requestDeleteConversation(conversation.conversation_id, conversation.title)}
+                        disabled={deleteConversation.isPending || chat.isPending}
+                        className="absolute right-2 top-3 grid size-6 place-items-center text-slate-300 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
+                      >
+                        {deleteConversation.isPending && deleteConversation.variables === conversation.conversation_id
+                          ? <LoaderCircle size={12} className="animate-spin" />
+                          : <Trash2 size={12} />}
+                      </button>
+                    </div>
                   )
                 })}
               </div>
@@ -312,7 +360,7 @@ export function AgentPage() {
                 {chat.isPending ? 'AI 正在调用风控系统分析' : '风控工具链待命'}
               </strong>
               <span className={`text-[8px] ${chat.isPending ? 'text-amber-600' : 'text-teal-700/60'}`}>
-                {chat.isPending ? '意图识别 → 工具路由 → 业务数据 → 风险证据 → 结论生成' : '所有结论必须引用系统工具返回的事实'}
+                {chat.isPending ? 'Context 抽取 → 缺失检查 → 风控工具 → 决策证据 → 条件建议' : '所有风险与敞口结论必须引用确定性工具结果'}
               </span>
             </div>
             {lastResponse && !chat.isPending && <Badge tone="success" className="rounded-sm px-2 py-0.5 text-[8px]">{lastResponse.tools_used.length} TOOLS VERIFIED</Badge>}
@@ -366,7 +414,7 @@ export function AgentPage() {
                         </div>
                       )}
                     </div>
-                    <p className="px-4 py-3 text-[11px] leading-6 text-slate-700 whitespace-pre-wrap">{message.content}</p>
+                    <AgentMarkdown content={message.content} />
                     {message.response && (
                       <div className="flex flex-wrap items-center gap-3 border-t border-slate-100 bg-slate-50/70 px-4 py-2 text-[8px] text-slate-400">
                         <span className="flex items-center gap-1"><CheckCircle2 size={10} className="text-emerald-600" />{message.response.tools_used.length} 个工具已验证</span>
@@ -387,7 +435,7 @@ export function AgentPage() {
                       <div>
                         <strong className="block text-[10px] text-slate-700">AI 正在调用风控系统分析</strong>
                         <div className="mt-1 flex items-center gap-1 text-[8px] text-slate-400">
-                          <span>客户数据</span><ChevronRight size={9} /><span>信用评分</span><ChevronRight size={9} /><span>规则与模型</span>
+                          <span>交易 Context</span><ChevronRight size={9} /><span>风险敞口</span><ChevronRight size={9} /><span>建议条件</span>
                         </div>
                       </div>
                     </div>
@@ -410,7 +458,7 @@ export function AgentPage() {
                     submit()
                   }
                 }}
-                placeholder="输入客户、订单、信用或风险调查问题……"
+                placeholder="描述订单金额、币种、定金、账期、合同、付款主体或保障条件……"
                 className="resize-none rounded-none border-0 text-[11px] leading-5 focus:border-0"
               />
               <div className="flex items-center justify-between border-t border-slate-100 px-3 py-2">
@@ -437,7 +485,7 @@ export function AgentPage() {
       </div>
 
       <div className="mt-3 flex flex-col gap-2 border border-slate-200 bg-white px-4 py-3 text-[8px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-        <span className="flex items-center gap-1.5"><ShieldCheck size={11} className="text-teal-600" />Agent 仅提供辅助判断，不执行暂停发货、观察名单或黑名单操作。</span>
+        <span className="flex items-center gap-1.5"><ShieldCheck size={11} className="text-teal-600" />Agent 不自动批准或拒绝授信，条件调整只做模拟，最终决策由商户确认。</span>
         <span className="flex items-center gap-1.5"><Clock3 size={11} />会话和工具调用已脱敏持久化</span>
       </div>
     </div>

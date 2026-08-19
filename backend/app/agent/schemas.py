@@ -1,7 +1,7 @@
 """Agent 内部使用的数据契约。
 
 本模块只定义 Python 协议和轻量数据对象，不导入 SQLAlchemy，也不持有数据库
-Session。这样可以从类型层面保证 Agent、Mock Agent 和 LLM Provider 都不能直接
+Session。这样可以从类型层面保证 Agent、确定性状态机和 LLM Provider 都不能直接
 访问数据库；真实业务数据只能经由 ``AgentDataGateway`` 提供。
 """
 
@@ -33,6 +33,30 @@ class AgentDataGateway(Protocol):
     def get_risk_event_detail(self, event_id: int) -> dict | None: ...
 
     def search_risk_knowledge(self, query: str, category: str | None = None, limit: int = 5) -> dict: ...
+
+    def get_risk_evaluation_criteria(self) -> dict: ...
+
+    def evaluate_transaction_decision(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict: ...
+
+    def get_transaction_risk(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict: ...
+
+    def calculate_risk_exposure(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict: ...
+
+    def get_evidence_completeness(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict: ...
+
+    def evaluate_credit_terms(self, transaction_context: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict: ...
+
+    def simulate_transaction_adjustment(self, base_context: dict, adjustments: dict, customer_id: int | None = None, transaction_id: int | None = None) -> dict: ...
+
+    def get_transaction_timeline(self, transaction_id: int) -> dict | None: ...
+
+
+class DecisionContextStore(Protocol):
+    """结构化决策上下文接口；实现位于 Service 层，Agent 不感知数据库。"""
+
+    def load(self, merchant_id: int, conversation_id: str) -> dict[str, Any]: ...
+
+    def save(self, merchant_id: int, conversation_id: str, **state: Any) -> dict[str, Any]: ...
 
 
 @dataclass(slots=True)
@@ -72,7 +96,7 @@ class IntentResult:
 
 @dataclass(slots=True)
 class AgentExecution:
-    """Mock/LLM Agent 共同遵守的执行结果。"""
+    """确定性状态机与 LLM Agent 共同遵守的执行结果。"""
 
     answer: str
     tool_results: list[ToolResult]
@@ -81,3 +105,12 @@ class AgentExecution:
     intent: str = ""
     call_chain: list[dict[str, Any]] = field(default_factory=list)
     state_history: list[dict[str, Any]] = field(default_factory=list)
+    transaction_id: int | None = None
+    context_version: int = 1
+    transaction_context: dict[str, Any] = field(default_factory=dict)
+    required_fields: list[str] = field(default_factory=list)
+    missing_fields: list[str] = field(default_factory=list)
+    information_completeness: float = 0
+    next_best_question: str = ""
+    decision_result: dict[str, Any] | None = None
+    comparison: dict[str, Any] | None = None

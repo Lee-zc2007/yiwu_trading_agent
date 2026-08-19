@@ -9,16 +9,15 @@ const nav=[
   {href:'/dashboard',label:'风控总览',caption:'风险态势与关键指标',icon:Gauge},
   {href:'/customers',label:'外商档案',caption:'信用画像与交易历史',icon:Users},
   {href:'/transactions',label:'交易管理',caption:'订单与批量导入',icon:FileSearch},
-  {href:'/risk-check',label:'新订单检测',caption:'路演核心风控流程',icon:Radar},
+  {href:'/risk-check',label:'交易授信决策',caption:'敞口、证据与交易条件',icon:Radar},
   {href:'/alerts',label:'预警中心',caption:'证据与处置闭环',icon:AlertTriangle},
   {href:'/agent',label:'AI 风控 Agent',caption:'工具调用与解释',icon:Bot},
-  {href:'/demo-scenarios',label:'演示场景',caption:'六类稳定风险样例',icon:ShieldCheck},
 ]
 
 export function AppShell({children}:{children:React.ReactNode}){const path=usePathname();const {sidebarOpen,setSidebarOpen}=useAppStore();return <div className="min-h-screen bg-[#f4f7f7] text-slate-900">
   <aside className={cn('fixed inset-y-0 left-0 z-50 flex w-64 flex-col bg-[#0b2e2d] text-white transition-transform lg:translate-x-0',sidebarOpen?'translate-x-0':'-translate-x-full')}>
     <div className="flex h-20 items-center gap-3 border-b border-white/10 px-5"><div className="grid size-10 place-items-center rounded-xl bg-teal-400 text-[#07302e]"><ShieldCheck size={23}/></div><div><strong className="block text-[15px]">TradeGuard AI</strong><span className="text-[10px] tracking-[.14em] text-teal-100/60">外贸风控智能体</span></div><button aria-label="关闭导航" onClick={()=>setSidebarOpen(false)} className="ml-auto lg:hidden"><X size={19}/></button></div>
-    <div className="mx-4 mt-4 rounded-lg border border-white/10 bg-white/5 px-3 py-2.5"><div className="flex items-center gap-2 text-xs text-teal-50"><i className="size-2 rounded-full bg-emerald-400 shadow-[0_0_0_4px_rgba(52,211,153,.12)]"/>系统运行正常</div><p className="mt-1 text-[10px] text-teal-100/55">Mock Agent · 本地模型已启用</p></div>
+    <div className="mx-4 mt-4 rounded-lg border border-white/10 bg-white/5 px-3 py-2.5"><div className="flex items-center gap-2 text-xs text-teal-50"><i className="size-2 rounded-full bg-emerald-400 shadow-[0_0_0_4px_rgba(52,211,153,.12)]"/>系统运行正常</div><p className="mt-1 text-[10px] text-teal-100/55">DeepSeek 优先 · 确定性 Tool 约束</p></div>
     <nav className="mt-4 flex-1 space-y-1 px-3">{nav.map(item=>{const active=path===item.href||path.startsWith(item.href+'/');return <Link key={item.href} href={item.href} onClick={()=>setSidebarOpen(false)} className={cn('group flex items-center gap-3 rounded-lg px-3 py-2.5 text-teal-50/70 hover:bg-white/7 hover:text-white',active&&'bg-teal-400/15 text-teal-200 ring-1 ring-teal-300/10')}><item.icon size={18}/><div className="min-w-0 flex-1"><strong className="block text-xs">{item.label}</strong><span className="block truncate text-[9px] opacity-55">{item.caption}</span></div><ChevronRight size={13} className="opacity-0 group-hover:opacity-70"/></Link>})}</nav>
     <div className="m-4 rounded-lg bg-[#082523] p-3 text-[10px] leading-5 text-teal-100/55">辅助决策系统<br/><span className="text-teal-200/80">高风险操作必须人工确认</span></div>
   </aside>{sidebarOpen&&<button aria-label="关闭导航遮罩" className="fixed inset-0 z-40 bg-black/40 lg:hidden" onClick={()=>setSidebarOpen(false)}/>}

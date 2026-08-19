@@ -130,6 +130,8 @@ class TriggeredRuleOutput(ToolSchema):
     rule_name: str = Field(description="规则名称")
     risk_level: str = Field(description="规则风险等级")
     risk_score: float = Field(ge=0, le=100, description="规则风险分")
+    severity: str = Field(description="规则严重度")
+    risk_contribution: float = Field(ge=0, le=100, description="可解释的风险贡献")
     reason: str = Field(description="命中原因")
     evidence: dict[str, Any] = Field(description="规则证据快照")
 
@@ -154,6 +156,7 @@ class OrderRiskAnalysisOutput(ToolSchema):
     rule_version: str = Field(description="风险规则版本")
     disclaimer: str = Field(description="风控结果免责声明")
     feature_snapshot: dict[str, float] = Field(description="异常检测特征快照")
+    anomaly_signal: dict[str, Any] = Field(description="只作辅助判断的行为异常信号")
     analysis_source: str = Field(description="分析来源，固定为只读运行")
 
 
@@ -292,6 +295,124 @@ class RiskKnowledgeSearchOutput(ToolSchema):
     items: list[RiskKnowledgeItemOutput]
 
 
+class RiskEvaluationCriteriaInput(ToolSchema):
+    """系统评价标准不依赖客户或订单参数。"""
+
+
+class RiskEvaluationCriteriaOutput(ToolSchema):
+    """从当前规则配置与确定性 Service 常量读取的评价口径。"""
+
+    methodology_version: str
+    source_kind: Literal["deterministic_configuration"]
+    purpose: str
+    customer_trust: dict[str, Any]
+    transaction_risk: dict[str, Any]
+    risk_exposure: dict[str, Any]
+    evidence_completeness: dict[str, Any]
+    risk_mitigation: dict[str, Any]
+    credit_terms: dict[str, Any]
+    anomaly_signal: dict[str, Any]
+    legacy_credit_reference: dict[str, Any]
+    decision_version: str
+
+
+class TransactionDecisionInput(ToolSchema):
+    """草稿或已有交易的统一决策输入。"""
+
+    transaction_context: dict[str, Any] = Field(default_factory=dict, description="已抽取并确定性合并的交易上下文")
+    customer_id: int | None = Field(default=None, gt=0)
+    transaction_id: int | None = Field(default=None, gt=0)
+
+
+class TransactionRiskOutput(ToolSchema):
+    risk_level: str
+    risk_score: float = Field(ge=0, le=100)
+    triggered_rules: list[dict[str, Any]]
+    main_reasons: list[str]
+    rule_version: str
+
+
+class RiskExposureOutput(ToolSchema):
+    currency: str
+    order_amount: float
+    confirmed_payment_amount: float
+    shipped_or_delivered_value: float
+    planned_shipping_value: float
+    planned_payment_before_shipping: float
+    current_exposure: float
+    projected_max_exposure: float
+    coverage_amount: float
+    coverage_ratio: float
+    verified_coverage_items: list[dict[str, Any]]
+    ignored_mitigations: list[dict[str, Any]]
+    calculation: dict[str, str]
+
+
+class EvidenceCompletenessOutput(ToolSchema):
+    completeness: float = Field(ge=0, le=1)
+    verified_weight: float
+    required_weight: float
+    required: list[dict[str, Any]]
+    verified: list[str]
+    missing: list[str]
+    critical_missing: list[str]
+    calculation: str
+
+
+class TransactionDecisionOutput(ToolSchema):
+    customer_trust: dict[str, Any]
+    transaction_risk: dict[str, Any]
+    risk_exposure: dict[str, Any]
+    evidence: dict[str, Any]
+    mitigations: dict[str, Any]
+    anomaly_signal: dict[str, Any]
+    credit_terms: dict[str, Any]
+    decision_status: str
+    main_risks: list[str]
+    missing_information: list[str]
+    recommendations: list[str]
+    calculation_version: str
+    disclaimer: str
+
+
+class TransactionSimulationInput(ToolSchema):
+    base_context: dict[str, Any]
+    adjustments: dict[str, Any]
+    customer_id: int | None = Field(default=None, gt=0)
+    transaction_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def adjustments_are_safe(self):
+        allowed = {
+            "deposit_ratio", "deposit_amount", "confirmed_payment_amount", "credit_days",
+            "final_payment_ratio", "final_payment_due_type", "planned_shipping_value",
+            "planned_payment_before_shipping", "contract_signed", "payer_matches_contract",
+            "payment_account_changed", "payment_account_verified", "partial_payment",
+            "partial_shipment", "mitigations",
+        }
+        unsupported = sorted(set(self.adjustments) - allowed)
+        if unsupported:
+            raise ValueError("不支持模拟修改字段：" + ", ".join(unsupported))
+        return self
+
+
+class TransactionSimulationOutput(ToolSchema):
+    adjustments: dict[str, Any]
+    before: dict[str, Any]
+    after: dict[str, Any]
+    comparison: dict[str, Any]
+    persisted: Literal[False]
+
+
+class TransactionTimelineInput(ToolSchema):
+    transaction_id: int = Field(gt=0)
+
+
+class TransactionTimelineOutput(ToolSchema):
+    transaction_id: int
+    items: list[dict[str, Any]]
+
+
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     """Tool 名称、说明、输入输出 Schema 与网关调用函数。"""
@@ -325,6 +446,19 @@ class AgentToolRegistry:
                 RiskKnowledgeSearchOutput,
                 self._knowledge,
             ),
+            ToolDefinition(
+                "get_risk_evaluation_criteria",
+                "读取系统当前生效的客户可信度、交易规则、敞口公式、证据权重、风险缓释、授信条件与异常信号边界；回答系统评价标准时必须使用",
+                RiskEvaluationCriteriaInput,
+                RiskEvaluationCriteriaOutput,
+                self._risk_evaluation_criteria,
+            ),
+            ToolDefinition("get_transaction_risk", "读取确定性交易规则风险；异常模型只作为辅助信号", TransactionDecisionInput, TransactionRiskOutput, self._transaction_risk),
+            ToolDefinition("calculate_risk_exposure", "确定性计算当前与预计最大风险敞口", TransactionDecisionInput, RiskExposureOutput, self._risk_exposure),
+            ToolDefinition("get_evidence_completeness", "按必需证据权重检查证据完整度与关键缺失项", TransactionDecisionInput, EvidenceCompletenessOutput, self._evidence_completeness),
+            ToolDefinition("evaluate_credit_terms", "调用统一交易决策服务生成客户信任、交易风险、敞口、证据和授信条件建议", TransactionDecisionInput, TransactionDecisionOutput, self._credit_terms),
+            ToolDefinition("simulate_transaction_adjustment", "只在内存中模拟定金、账期、付款或发货条件调整，不修改正式交易", TransactionSimulationInput, TransactionSimulationOutput, self._simulate_adjustment),
+            ToolDefinition("get_transaction_timeline", "读取已有交易的付款、发货、交付、延期和争议时间线", TransactionTimelineInput, TransactionTimelineOutput, self._timeline),
         ]
         self._tools = {item.name: item for item in definitions}
 
@@ -427,6 +561,34 @@ class AgentToolRegistry:
         data = self._as(payload, RiskKnowledgeSearchInput)
         return self.gateway.search_risk_knowledge(data.query, data.category, data.limit)
 
+    def _risk_evaluation_criteria(self, payload: ToolSchema) -> dict:
+        self._as(payload, RiskEvaluationCriteriaInput)
+        return self.gateway.get_risk_evaluation_criteria()
+
+    def _transaction_risk(self, payload: ToolSchema) -> dict:
+        data = self._as(payload, TransactionDecisionInput)
+        return self.gateway.get_transaction_risk(data.transaction_context, data.customer_id, data.transaction_id)
+
+    def _risk_exposure(self, payload: ToolSchema) -> dict:
+        data = self._as(payload, TransactionDecisionInput)
+        return self.gateway.calculate_risk_exposure(data.transaction_context, data.customer_id, data.transaction_id)
+
+    def _evidence_completeness(self, payload: ToolSchema) -> dict:
+        data = self._as(payload, TransactionDecisionInput)
+        return self.gateway.get_evidence_completeness(data.transaction_context, data.customer_id, data.transaction_id)
+
+    def _credit_terms(self, payload: ToolSchema) -> dict:
+        data = self._as(payload, TransactionDecisionInput)
+        return self.gateway.evaluate_credit_terms(data.transaction_context, data.customer_id, data.transaction_id)
+
+    def _simulate_adjustment(self, payload: ToolSchema) -> dict:
+        data = self._as(payload, TransactionSimulationInput)
+        return self.gateway.simulate_transaction_adjustment(data.base_context, data.adjustments, data.customer_id, data.transaction_id)
+
+    def _timeline(self, payload: ToolSchema) -> dict | None:
+        data = self._as(payload, TransactionTimelineInput)
+        return self.gateway.get_transaction_timeline(data.transaction_id)
+
     @staticmethod
     def _as(payload: ToolSchema, expected: type[ToolSchema]):
         """让类型收窄保持集中；运行时输入已由注册定义验证。"""
@@ -464,6 +626,13 @@ class AgentToolRegistry:
             "generate_verification_checklist": lambda: f"基于 {data['based_on_alert_count']} 条预警生成核验清单",
             "get_risk_event_detail": lambda: f"已读取风险事件 #{data['id']} 的证据快照",
             "search_risk_knowledge": lambda: f"通过 {data['retrieval_method']} 召回 {len(data['items'])} 条非结构化知识",
+            "get_risk_evaluation_criteria": lambda: f"已读取 {data['transaction_risk']['version']} 的 {data['transaction_risk']['enabled_rule_count']} 条启用规则及完整决策口径",
+            "get_transaction_risk": lambda: f"确定性交易风险等级为 {data['risk_level']}，命中 {len(data['triggered_rules'])} 条规则",
+            "calculate_risk_exposure": lambda: f"预计最大风险敞口 {data['projected_max_exposure']:,.2f} {data['currency']}",
+            "get_evidence_completeness": lambda: f"证据完整度 {data['completeness']:.0%}，缺少 {len(data['missing'])} 项",
+            "evaluate_credit_terms": lambda: f"交易条件建议状态为 {data['decision_status']}",
+            "simulate_transaction_adjustment": lambda: f"已完成条件模拟，预计敞口变化 {data['comparison']['projected_exposure_change']:,.2f}",
+            "get_transaction_timeline": lambda: f"已读取交易 #{data['transaction_id']} 的 {len(data['items'])} 条时间线事件",
         }
         return templates[name]()
 
@@ -507,6 +676,29 @@ class AgentToolRegistry:
                 for item in data["items"]
             ]
             return evidence, [], [], []
+        if name == "get_risk_evaluation_criteria":
+            return [
+                EvidenceRef(
+                    "risk_methodology",
+                    data["methodology_version"],
+                    f"当前系统评价标准：{data['transaction_risk']['version']}，{data['transaction_risk']['enabled_rule_count']} 条启用规则",
+                )
+            ], [], [], []
+        if name in {"get_transaction_risk", "calculate_risk_exposure", "get_evidence_completeness", "evaluate_credit_terms"}:
+            transaction_id = data.get("transaction_id")
+            if name == "evaluate_credit_terms":
+                summary = f"交易决策：{data['decision_status']}，预计敞口 {data['risk_exposure']['projected_max_exposure']:.2f} {data['risk_exposure']['currency']}"
+            elif name == "get_transaction_risk":
+                summary = f"交易风险：{data['risk_level']} / {data['risk_score']:.1f}"
+            elif name == "calculate_risk_exposure":
+                summary = f"预计最大风险敞口：{data['projected_max_exposure']:.2f} {data['currency']}"
+            else:
+                summary = f"证据完整度：{data['completeness']:.0%}"
+            return [EvidenceRef("transaction_decision", str(transaction_id or "draft"), summary)], [], [transaction_id] if transaction_id else [], []
+        if name == "simulate_transaction_adjustment":
+            return [EvidenceRef("decision_simulation", "draft", "交易条件调整前后确定性对比")], [], [], []
+        if name == "get_transaction_timeline":
+            return [EvidenceRef("transaction_timeline", str(data["transaction_id"]), f"{len(data['items'])} 条时间线事件")], [], [data["transaction_id"]], []
         return [], [], [], []
 
 
@@ -528,4 +720,15 @@ __all__ = [
     "VerificationChecklistOutput",
     "RiskKnowledgeSearchInput",
     "RiskKnowledgeSearchOutput",
+    "RiskEvaluationCriteriaInput",
+    "RiskEvaluationCriteriaOutput",
+    "TransactionDecisionInput",
+    "TransactionRiskOutput",
+    "RiskExposureOutput",
+    "EvidenceCompletenessOutput",
+    "TransactionDecisionOutput",
+    "TransactionSimulationInput",
+    "TransactionSimulationOutput",
+    "TransactionTimelineInput",
+    "TransactionTimelineOutput",
 ]

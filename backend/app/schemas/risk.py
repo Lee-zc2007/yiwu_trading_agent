@@ -10,6 +10,8 @@ class RuleResult(BaseModel):
     rule_name: str
     risk_level: str
     risk_score: float
+    severity: str | None = None
+    risk_contribution: float | None = None
     reason: str
     evidence: dict[str, Any]
 
@@ -25,7 +27,6 @@ class OrderRiskRequest(BaseModel):
     shipping_address: str = Field(min_length=1, max_length=300)
     order_time: datetime = Field(default_factory=datetime.now)
     persist_event: bool = True
-    scenario_code: str | None = None
 
     @field_validator("order_time")
     @classmethod

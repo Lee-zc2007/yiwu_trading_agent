@@ -1,22 +1,28 @@
 import io
+from datetime import UTC, datetime
 from math import ceil
 from pathlib import Path
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...core.config import settings
 from ...core.database import get_db
-from ...models import Transaction
+from ...models import Transaction, TransactionEvidenceItem, TransactionMitigation, TransactionTerm, TransactionTimelineEvent
 from ...repositories.customers import CustomerRepository
 from ...risk.scoring import CreditScoringService
+from ...risk.decision import TransactionDecisionService
+from ...risk.exposure import RiskExposureService
 from ...risk.service import RiskAssessmentService
 from ...schemas.common import ApiResponse, ImportResult, Pagination
+from ...schemas.decision import EvidenceInput, MitigationInput, TransactionTermsInput
 from ...schemas.transaction import TransactionCreate, TransactionResponse
 from ...services.audit import record_audit
+from ...services.evidence_package import TransactionEvidencePackageService
 from ..dependencies import get_merchant_id
 
 
@@ -25,6 +31,17 @@ router = APIRouter(prefix="/api/transactions", tags=["交易"])
 
 def transaction_data(item: Transaction) -> dict:
     return {column.name: getattr(item, column.name) for column in Transaction.__table__.columns}
+
+
+def model_data(item) -> dict:
+    return {column.name: getattr(item, column.name) for column in item.__table__.columns}
+
+
+def scoped_transaction(db: Session, merchant_id: int, transaction_id: int) -> Transaction:
+    item = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.merchant_id == merchant_id).first()
+    if item is None:
+        raise HTTPException(404, "交易不存在或不属于当前商户")
+    return item
 
 
 @router.get("", response_model=ApiResponse[Pagination[TransactionResponse]])
@@ -58,9 +75,194 @@ def create_transaction(payload: TransactionCreate, merchant_id: int = Depends(ge
 
 @router.get("/{transaction_id}", response_model=ApiResponse[TransactionResponse])
 def get_transaction(transaction_id: int, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
-    item = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.merchant_id == merchant_id).first()
-    if not item: raise HTTPException(404, "交易不存在")
+    item = scoped_transaction(db, merchant_id, transaction_id)
     return {"data": transaction_data(item)}
+
+
+@router.get("/{transaction_id}/exposure", response_model=ApiResponse[dict])
+def get_transaction_exposure(transaction_id: int, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
+    item = scoped_transaction(db, merchant_id, transaction_id)
+    return {"data": RiskExposureService(db, merchant_id).for_transaction(item)}
+
+
+@router.get("/{transaction_id}/decision", response_model=ApiResponse[dict])
+def get_transaction_decision(transaction_id: int, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
+    item = scoped_transaction(db, merchant_id, transaction_id)
+    return {"data": TransactionDecisionService(db, merchant_id).evaluate(transaction=item)}
+
+
+@router.get("/{transaction_id}/terms", response_model=ApiResponse[dict])
+def get_transaction_terms(transaction_id: int, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
+    item = scoped_transaction(db, merchant_id, transaction_id)
+    if item.terms:
+        data = model_data(item.terms)
+    else:
+        data = {
+            "transaction_id": item.id,
+            "merchant_id": merchant_id,
+            "credit_days": None,
+            "payment_due_date": None,
+            "deposit_ratio": item.deposit_ratio,
+            "deposit_amount": round(item.amount * item.deposit_ratio, 2),
+            "final_payment_ratio": round(1 - item.deposit_ratio, 4),
+            "final_payment_due_type": None,
+            "contract_signed": None,
+            "payer_matches_contract": None,
+            "payment_account_changed": None,
+            "payment_account_verified": None,
+            "planned_shipping_value": item.amount,
+            "planned_payment_before_shipping": round(item.amount * item.deposit_ratio, 2),
+            "source": "legacy_transaction_fallback",
+        }
+    return {"data": data}
+
+
+@router.put("/{transaction_id}/terms", response_model=ApiResponse[dict])
+def update_transaction_terms(
+    transaction_id: int,
+    payload: TransactionTermsInput,
+    merchant_id: int = Depends(get_merchant_id),
+    db: Session = Depends(get_db),
+):
+    item = scoped_transaction(db, merchant_id, transaction_id)
+    values = payload.model_dump(exclude_unset=True)
+    if values.get("deposit_amount", 0) > item.amount:
+        raise HTTPException(400, "定金金额不能超过订单金额")
+    terms = item.terms
+    before = model_data(terms) if terms else {}
+    if terms is None:
+        terms = TransactionTerm(merchant_id=merchant_id, transaction_id=item.id)
+        db.add(terms)
+    for key, value in values.items():
+        setattr(terms, key, value)
+    record_audit(db, merchant_id, "transaction_terms", item.id, "update", before=before, after=values)
+    db.commit()
+    return {"data": model_data(terms), "message": "交易条款已更新并记录审计日志"}
+
+
+@router.get("/{transaction_id}/evidence", response_model=ApiResponse[list[dict]])
+def list_transaction_evidence(transaction_id: int, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
+    scoped_transaction(db, merchant_id, transaction_id)
+    rows = db.query(TransactionEvidenceItem).filter(
+        TransactionEvidenceItem.transaction_id == transaction_id,
+        TransactionEvidenceItem.merchant_id == merchant_id,
+    ).order_by(TransactionEvidenceItem.created_at.desc()).all()
+    return {"data": [model_data(item) for item in rows]}
+
+
+@router.post("/{transaction_id}/evidence", response_model=ApiResponse[dict], status_code=201)
+def add_transaction_evidence(
+    transaction_id: int,
+    payload: EvidenceInput,
+    merchant_id: int = Depends(get_merchant_id),
+    db: Session = Depends(get_db),
+):
+    scoped_transaction(db, merchant_id, transaction_id)
+    values = payload.model_dump()
+    if values["verified"] and values["verified_at"] is None:
+        values["verified_at"] = datetime.now(UTC).replace(tzinfo=None)
+    row = TransactionEvidenceItem(merchant_id=merchant_id, transaction_id=transaction_id, **values)
+    db.add(row)
+    db.flush()
+    record_audit(db, merchant_id, "transaction_evidence", row.id, "create", after={"evidence_type": row.evidence_type, "verified": row.verified})
+    db.commit()
+    return {"data": model_data(row), "message": "证据元数据已保存；敏感原文不写入 Agent 会话"}
+
+
+@router.get("/{transaction_id}/mitigations", response_model=ApiResponse[list[dict]])
+def list_transaction_mitigations(transaction_id: int, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
+    scoped_transaction(db, merchant_id, transaction_id)
+    rows = db.query(TransactionMitigation).filter(
+        TransactionMitigation.transaction_id == transaction_id,
+        TransactionMitigation.merchant_id == merchant_id,
+    ).order_by(TransactionMitigation.created_at.desc()).all()
+    return {"data": [model_data(item) for item in rows]}
+
+
+@router.post("/{transaction_id}/mitigations", response_model=ApiResponse[dict], status_code=201)
+def add_transaction_mitigation(
+    transaction_id: int,
+    payload: MitigationInput,
+    merchant_id: int = Depends(get_merchant_id),
+    db: Session = Depends(get_db),
+):
+    scoped_transaction(db, merchant_id, transaction_id)
+    row = TransactionMitigation(merchant_id=merchant_id, transaction_id=transaction_id, **payload.model_dump())
+    db.add(row)
+    db.flush()
+    record_audit(db, merchant_id, "transaction_mitigation", row.id, "create", after={"mitigation_type": row.mitigation_type, "verified": row.verified, "coverage_amount": row.coverage_amount})
+    db.commit()
+    return {"data": model_data(row), "message": "风险缓释措施已保存"}
+
+
+@router.get("/{transaction_id}/timeline", response_model=ApiResponse[list[dict]])
+def get_transaction_timeline(transaction_id: int, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
+    scoped_transaction(db, merchant_id, transaction_id)
+    rows = db.query(TransactionTimelineEvent).filter(
+        TransactionTimelineEvent.transaction_id == transaction_id,
+        TransactionTimelineEvent.merchant_id == merchant_id,
+    ).order_by(TransactionTimelineEvent.event_time).all()
+    return {"data": [model_data(item) for item in rows]}
+
+
+@router.post("/{transaction_id}/evidence-package", response_model=ApiResponse[dict], status_code=201)
+def generate_transaction_evidence_package(
+    transaction_id: int,
+    merchant_id: int = Depends(get_merchant_id),
+    db: Session = Depends(get_db),
+):
+    """生成并固化一份证据包快照，便于复核时重现当时的事实与结论。"""
+
+    transaction = scoped_transaction(db, merchant_id, transaction_id)
+    row = TransactionEvidencePackageService(db, merchant_id).generate(transaction)
+    record_audit(
+        db,
+        merchant_id,
+        "transaction_evidence_package",
+        row.id,
+        "generate",
+        after={"transaction_id": transaction_id, "checksum": row.checksum},
+    )
+    db.commit()
+    return {
+        "data": {
+            "id": row.id,
+            "transaction_id": row.transaction_id,
+            "checksum": row.checksum,
+            "generated_at": row.generated_at,
+            "package_data": row.package_data,
+            "html_url": f"/api/transactions/{transaction_id}/evidence-package?format=html",
+        },
+        "message": "交易证据包已生成并写入审计日志",
+    }
+
+
+@router.get("/{transaction_id}/evidence-package", response_model=None)
+def get_transaction_evidence_package(
+    transaction_id: int,
+    format: str = Query(default="json", pattern="^(json|html)$"),
+    merchant_id: int = Depends(get_merchant_id),
+    db: Session = Depends(get_db),
+):
+    """读取最新证据包；HTML 适合打印，JSON 适合集成和归档。"""
+
+    scoped_transaction(db, merchant_id, transaction_id)
+    row = TransactionEvidencePackageService(db, merchant_id).latest(transaction_id)
+    if row is None:
+        raise HTTPException(404, "尚未生成交易证据包")
+    if format == "html":
+        return HTMLResponse(row.html_content, headers={"X-Evidence-Package-Checksum": row.checksum})
+    return {
+        "success": True,
+        "data": {
+            "id": row.id,
+            "transaction_id": row.transaction_id,
+            "checksum": row.checksum,
+            "generated_at": row.generated_at,
+            "package_data": row.package_data,
+        },
+        "message": "ok",
+    }
 
 
 @router.post("/import", response_model=ApiResponse[ImportResult])

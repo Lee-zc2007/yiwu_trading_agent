@@ -1,143 +1,109 @@
-# AI Agent 基础框架
+# AI Agent 决策框架
 
-## 执行链路
+## 定位
+
+Agent 是交易决策流程的自然语言入口和编排器，不是风险计算器。它负责抽取字段、识别缺失信息、主动追问、调用 Tool 和引用结果解释；所有 Trust、规则、敞口、证据和条款结果来自确定性服务。
+
+## 状态图
 
 ```mermaid
 flowchart LR
-  U["用户问题"] --> S["AgentService"]
-  S --> GRAPH["AgentDecisionGraph"]
-  GRAPH --> I["Intent Detection"]
-  I --> T["Tool Selection / Execution"]
-  T --> R["Evidence Collection"]
-  T --> GW["AgentDataGateway 协议"]
-  GW --> B["只读业务网关"]
-  B --> RISK["既有风控服务 persist_event=false"]
-  B --> D[("业务数据库")]
-  RISK --> D
-  R --> A["Response Generation"]
-  A --> C["ConversationService"]
-  C --> M[("agent_conversations / agent_messages")]
+  START --> LOAD["Load Context"]
+  LOAD --> INTENT["Intent Detection"]
+  INTENT --> EXTRACT["Context Extraction"]
+  EXTRACT --> MERGE["Context Merge"]
+  MERGE --> RESOLVE["Resolve Customer"]
+  RESOLVE --> REQUIRED["Required Fields"]
+  REQUIRED --> QUESTION["Next Best Question"]
+  QUESTION -->|信息不足| SAVE["Save Context"]
+  QUESTION -->|信息足够| SELECT["Tool Selection"]
+  SELECT --> EXECUTE["Tool Execution"]
+  EXECUTE --> EVIDENCE["Evidence Collection"]
+  EVIDENCE --> RESPONSE["Response Generation"]
+  RESPONSE --> SAVE
+  SAVE --> END
 ```
 
-`backend.app.agent` 不导入 SQLAlchemy、ORM 模型、数据库 Session、信用评分服务或风险计算服务。API 层将 `SqlAlchemyAgentDataGateway` 注入 Agent，工具得到的都是普通字典和证据引用。
+当前未强制依赖 LangGraph，`AgentDecisionGraph.invoke(state)` 使用兼容 LangGraph 思路的同步状态机。每个节点将可序列化 State 写入 `state_history`，并通过 `call_chain` 返回调用链，未来可替换为正式 LangGraph compiled graph。
 
-## 目录职责
+## Decision Context
 
-- `service.py`：统一编排、模式选择、证据汇总、响应兼容。
-- `intent.py`：确定性意图识别，保证无模型时可演示。
-- `graph.py`：LangGraph 风格的 Agent State、节点、检查点和零依赖状态机。
-- `tools.py`：7 个核心 Tool 与 1 个兼容 Tool；每个 Tool 都有独立 Pydantic 输入/输出 Schema、中文说明和统一异常封装。
-- `prompts.py`：Prompt 版本、安全边界和用户上下文模板。
-- `schemas.py`：Agent 内部协议，不包含数据库类型。
-- `mock_agent.py`：本地确定性回答。
-- `llm_agent.py`：`LLMProvider` 接口与 OpenAI-compatible 实现。
-- `conversation.py`：按 Merchant 隔离的线程安全内存会话管理。
-- `services/agent_data.py`：Agent 包外的只读业务数据网关实现。
+State 和数据库上下文包含：消息、客户/交易 ID、意图、结构化 `transaction_context`、已知/必需/缺失字段、完整度、下一最佳问题、Tool 调用、Tool 结果、证据和最终回答。
 
-## 统一聊天接口
+`agent_decision_contexts` 与 `agent_messages` 分开存储。前者是可演进的业务字段状态，后者是脱敏聊天记录。后续轮次先加载 Context，再将当前消息抽取的增量字段合并；因此“20%”可补齐上一轮定金问题，“如果提高到 40%”可识别为模拟调整。
+
+## 统一接口
 
 ```http
 POST /api/agent/chat
-Content-Type: application/json
 X-Merchant-ID: 1
+X-User-ID: demo-user
+Content-Type: application/json
 ```
 
 ```json
 {
-  "message": "为什么这个客户最近被评为高风险？",
-  "customer_id": "5",
-  "conversation_id": "roadshow-main"
+  "message": "一个迪拜客户第一次合作，准备做3万美元订单，希望给45天账期",
+  "customer_id": "",
+  "conversation_id": "credit-review-001"
 }
 ```
 
-核心返回字段：
+响应除兼容字段外，还包含 `transaction_context`、`known_fields`、`missing_fields`、`information_completeness`、`next_best_question`、`decision_result`、`comparison`、`call_chain` 和 `state_history`。
 
-```json
-{
-  "answer": "...",
-  "tools_used": ["get_customer_profile", "get_customer_credit_score", "list_risk_alerts"],
-  "evidence": [{"source_type": "risk_event", "source_id": "1", "summary": "..."}],
-  "related_customer": {"id": 5, "company_name": "...", "country": "..."},
-  "related_orders": [75],
-  "risk_events": [1]
-}
-```
+## 交易决策 Tools
 
-响应暂时同时保留 `tools_called`、`data_sources` 和 `related_*_ids`，确保现有前端无需同步修改。
+| Tool | 作用 |
+|---|---|
+| `get_customer_profile` | 客户档案 |
+| `get_customer_credit_score` | legacy 信用评分参考 |
+| `get_customer_transactions` | 历史交易 |
+| `get_order_risk_analysis` | 兼容的既有订单风险分析 |
+| `list_risk_alerts` | 风险预警 |
+| `compare_customers` | 客户风险事实对比 |
+| `generate_verification_checklist` | 人工核验清单 |
+| `get_transaction_risk` | 规则化交易风险 |
+| `calculate_risk_exposure` | 当前/预计风险敞口 |
+| `get_evidence_completeness` | 必需证据与关键缺失 |
+| `evaluate_credit_terms` | 完整交易决策链 |
+| `simulate_transaction_adjustment` | 条款调整前后模拟，不写数据库 |
+| `get_transaction_timeline` | 可验证付款/发货/到期/纠纷时间线 |
+| `search_risk_knowledge` | 非结构化风控知识检索 |
 
-## 决策图与 State
+每个 Tool 均有 Pydantic 输入/输出 Schema、中文说明、统一异常结构和白名单注册。Tool 本身不复制风险算法，通过 `AgentDataGateway` 调用 Agent 包外的已有业务服务。
 
-当前依赖中没有 LangGraph，因此 `AgentDecisionGraph` 使用同步状态机实现，并提供与 CompiledGraph 相同风格的 `invoke(state)` 接口。`build_agent_graph()` 是统一构建入口，未来安装 LangGraph 后可在不改变 API 和 Tool 契约的情况下替换执行后端。
-
-执行节点固定为：
+## 多轮示例
 
 ```text
-START
-  -> Intent Detection
-  -> Tool Selection
-  -> Tool Execution
-  -> Evidence Collection
-  -> Response Generation
-  -> END
+用户：第一次合作，3万美元，45天账期
+Agent：请补充定金比例。
+
+用户：20%定金，身份已核验，合同已签
+Agent：请确认付款主体是否与合同主体一致。
+
+用户：一致
+Agent：调用 evaluate_credit_terms，引用首次授信、长账期、低定金、24000 USD 预计敞口和证据完整度输出建议。
+
+用户：如果定金提高到40%呢？
+Agent：识别 modify_transaction_terms，调用 simulate_transaction_adjustment，展示 before/after；不创建订单，不更新条款。
 ```
 
-每个节点都会保存完整可序列化快照，State 至少包含：
+## Mock 与 LLM
 
-```json
-{
-  "message": "为什么这个客户风险高",
-  "customer_id": 5,
-  "intent": "risk_analysis",
-  "tool_calls": [],
-  "tool_results": [],
-  "evidence": [],
-  "final_answer": ""
-}
-```
+`AGENT_MODE=deterministic` 仅用于离线测试，运行确定性抽取、追问和 Tool。`AGENT_MODE=llm` 时，所有用户可见回答都由 DeepSeek/OpenAI-compatible Provider 基于 Tool 证据生成；交易条件抽取、缺失字段判断、风险敞口和授信计算仍由确定性状态机完成，再交给模型整理表达。Provider 失败时返回明确错误，不生成本地替代回答。未来 Claude Provider 只需实现统一接口。
 
-`POST /api/agent/chat` 通过 `call_chain` 返回紧凑调用链，通过 `state_history` 返回逐节点快照。风险问题未提供订单 ID 时，图只能先调用 `get_customer_transactions` 获取最近订单，再调用 `get_order_risk_analysis`；该解析过程不会绕过 Tool 访问数据库。
-
-Response Generation 使用确定性模板读取 Tool 的结构化字段，并追加 `source_type`、`source_id` 和证据摘要。目标 Tool 调用失败时，即使前置实体解析 Tool 成功，也必须返回“数据不足”，不能生成风险结论。
-
-## 会话接口
-
-- `POST /api/agent/conversations`
-- `GET /api/agent/conversations`
-- `GET /api/agent/conversations/{conversation_id}`
-- `GET /api/agent/history/{conversation_id}`
-- `DELETE /api/agent/conversations/{conversation_id}`
-
-正式 API 使用数据库持久化 Conversation Memory：`agent_conversations` 保存商户、用户、外部会话 ID 和时间信息，`agent_messages` 保存脱敏后的角色、内容及安全 Tool 调用元数据。服务重启后可根据 `conversation_id` 恢复消息，并在后续请求未传 `customer_id` 时恢复既有客户上下文。
-
-所有查询同时按 `X-Merchant-ID` 和 `X-User-ID` 隔离；演示环境未传 `X-User-ID` 时使用 `demo-user`。邮箱、电话、地址、证件/注册/银行编号、长数字和 API Key 等凭证在写入数据库前替换为脱敏标记。Tool Memory 只保存 Tool 名称、成功状态、摘要和 `customer_id`、`order_id` 等白名单参数，不保存 Tool 完整返回值。
-
-`backend/app/agent/conversation.py` 仍保留进程内 `ConversationManager`，仅作为不经过 API 的本地回退实现；Agent Service 通过 `ConversationStore` 协议与数据库实现解耦。
+LLM 不可用、无 Key、输出不可解析或没有合规 Tool 证据时，系统回退 Mock。回退不影响确定性决策结果。
 
 ## 安全边界
 
-- 档案、信用、交易、预警、对比和清单 Tool 只读取已有业务数据。
-- 订单风险 Tool 经 Agent 包外网关调用现有 `RiskAssessmentService`，强制 `persist_event=false`，复用已有规则引擎与异常检测，不复制算法。
-- 订单风险 Tool 调用前必须存在历史信用评分；无评分时返回数据不足，避免 `latest_or_calculate` 触发补算。
-- Agent 不执行 SQL，不获得数据库 Session。
-- LLM 不直接调用风险规则、异常模型或综合评分服务，只能调用白名单 Tool。
-- Tool Registry 拒绝未注册工具并限制参数。
-- 高风险处置继续由原有人工确认 API 完成。
-- LLM 未调用工具或服务异常时回退 Mock，不接受无证据的自由回答。
+- Agent 包不获得数据库 Session，不执行 SQL；
+- LLM 不直接访问客户/交易表，不计算信用分或风险分；
+- 读写业务数据必须经过带 `merchant_id` 的网关或 API；
+- 模拟 Tool 不持久化正式交易或条款；
+- 消息入库前脱敏邮箱、电话、地址、账号、长数字和 API Key；
+- Tool Memory 只存 Tool 名、状态、摘要和允许的标识参数，不存完整返回；
+- 黑名单、放行、暂停发货和正式授信始终需要人工操作。
 
-## 模型扩展
+## RAG 边界
 
-`LLMProvider.complete(messages, tools)` 是统一模型接口。当前 `OpenAICompatibleProvider` 可连接 GPT 或兼容接口的 Qwen；后续 Claude、原生 Qwen 等 Provider 只需实现该协议，不需要修改 Agent Service 和工具层。
-
-## Tool 契约
-
-七个核心 Tool：
-
-1. `get_customer_profile`
-2. `get_customer_credit_score`
-3. `get_customer_transactions`
-4. `get_order_risk_analysis`
-5. `list_risk_alerts`
-6. `compare_customers`
-7. `generate_verification_checklist`
-
-`get_risk_event_detail` 是为现有 MVP 会话保留的兼容 Tool。所有 Tool 的 LLM JSON Schema 都直接由输入模型生成并拒绝额外字段；成功结果通过输出模型再次校验。失败统一返回 `success=false` 及 `error.code`、`error.message`，错误码包括 `TOOL_NOT_ALLOWED`、`TOOL_INPUT_INVALID`、`BUSINESS_DATA_NOT_FOUND`、`TOOL_EXECUTION_ERROR` 和 `TOOL_OUTPUT_INVALID`。
+`knowledge_base` 只保存外贸案例、义乌市场经验、合同风险规则和风控操作规范的文本块及向量。交易事实永远通过 SQL 业务服务查询，不复制进向量库。回答必须区分“结构化业务事实”和“非结构化知识参考”。

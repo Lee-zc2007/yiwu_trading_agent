@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from ...core.database import get_db
 from ...models import CreditScoreHistory, Customer
 from ...repositories.customers import CustomerRepository
-from ...risk.scoring import CreditScoringService
+from ...risk.scoring import CreditScoringService, CustomerTrustService
 from ...schemas.common import ApiResponse, Pagination
 from ...schemas.customer import CreditScoreResponse, CustomerCreate, CustomerResponse, CustomerUpdate
 from ...services.audit import record_audit
@@ -55,6 +55,16 @@ def get_customer(customer_id: int, merchant_id: int = Depends(get_merchant_id), 
     repository = CustomerRepository(db, merchant_id); customer = repository.get(customer_id)
     if not customer: raise HTTPException(404, "外商不存在或不属于当前商户")
     return {"data": customer_data(customer, repository)}
+
+
+@router.get("/{customer_id}/trust", response_model=ApiResponse[dict])
+def get_customer_trust(customer_id: int, merchant_id: int = Depends(get_merchant_id), db: Session = Depends(get_db)):
+    """返回 Customer Trust v2；读取时不写快照，也不重新计算 legacy 信用分。"""
+
+    customer = CustomerRepository(db, merchant_id).get(customer_id)
+    if not customer:
+        raise HTTPException(404, "外商不存在或不属于当前商户")
+    return {"data": CustomerTrustService(db, merchant_id).calculate(customer, save=False)}
 
 
 @router.put("/{customer_id}", response_model=ApiResponse[CustomerResponse])

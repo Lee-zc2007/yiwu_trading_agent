@@ -31,13 +31,20 @@ class RiskAssessmentService:
         triggered = RiskRuleEngine(self.db, self.merchant_id).evaluate(customer, order, history)
         anomaly = AnomalyService(self.db, self.merchant_id).analyze(history, order)
         rule_score = max([item["risk_score"] for item in triggered], default=0)
+        rule_contribution = sum(item.get("risk_contribution", 0) for item in triggered)
         historical_events = self.db.query(RiskEvent).filter(RiskEvent.merchant_id == self.merchant_id, RiskEvent.customer_id == customer.id, RiskEvent.status.in_(["pending", "investigating", "confirmed"])).count()
         credit_risk = 100 - credit.total_score
-        overall = min(100.0, credit_risk * .25 + rule_score * .35 + anomaly["statistical_anomaly_score"] * 100 * .15 + anomaly["anomaly_score"] * 100 * .25 + min(8, historical_events * 2))
+        # 综合交易风险由确定性规则主导。客户历史与未结事件只作有限修正；
+        # Isolation Forest 明确不参与固定加权，不能单独把交易升级为 HIGH/CRITICAL。
+        if triggered:
+            supplementary = max(0, rule_contribution - max(item.get("risk_contribution", 0) for item in triggered))
+            overall = min(100.0, rule_score + min(8, supplementary * 0.1) + min(6, historical_events * 1.5))
+        else:
+            overall = min(30.0, credit_risk * 0.12 + min(6, historical_events * 1.5))
         level = overall_level(overall)
         main_reasons = [item["reason"] for item in triggered[:4]]
-        if anomaly["anomaly_score"] >= .7:
-            main_reasons.append(f"Isolation Forest 异常度达到 {anomaly['anomaly_score']:.0%}")
+        if anomaly["anomaly_detected"]:
+            main_reasons.append(f"辅助行为异常信号为 {anomaly['anomaly_score']:.0%}，需核验但不单独决定风险等级")
         if credit.total_score < 60:
             main_reasons.append(f"客户当前信用分仅 {credit.total_score:.1f}")
         if not main_reasons:
@@ -59,6 +66,9 @@ class RiskAssessmentService:
                     "features": anomaly["features"],
                     "statistical_anomaly_score": anomaly["statistical_anomaly_score"],
                     "anomaly_score": anomaly["anomaly_score"],
+                    "anomaly_detected": anomaly["anomaly_detected"],
+                    "feature_deviations": anomaly["feature_deviations"],
+                    "anomaly_explanation": anomaly["explanation"],
                     "model_version": anomaly["model_version"],
                     "model_status": anomaly["model_status"],
                     "rule_version": RiskRuleEngine.version,
@@ -78,6 +88,14 @@ class RiskAssessmentService:
             "risk_level": level,
             "statistical_anomaly_score": anomaly["statistical_anomaly_score"],
             "anomaly_score": anomaly["anomaly_score"],
+            "anomaly_signal": {
+                "anomaly_detected": anomaly["anomaly_detected"],
+                "anomaly_score": anomaly["anomaly_score"],
+                "model_version": anomaly["model_version"],
+                "feature_deviations": anomaly["feature_deviations"],
+                "explanation": anomaly["explanation"],
+                "signal_role": "auxiliary_only",
+            },
             "triggered_rules": triggered,
             "main_reasons": main_reasons,
             "recommendations": recommendations,

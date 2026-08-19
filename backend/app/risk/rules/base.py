@@ -12,13 +12,17 @@ class RiskRule(ABC):
         self.config = config
         self.severity = severity
 
-    def result(self, reason: str, evidence: dict, score: float | None = None) -> dict:
+    def result(self, reason: str, evidence: dict, score: float | None = None, contribution: float | None = None) -> dict:
+        risk_score = score if score is not None else {"low": 35, "medium": 55, "high": 78, "critical": 92}.get(self.severity, 55)
+        risk_contribution = contribution if contribution is not None else {"low": 10, "medium": 25, "high": 45, "critical": 70}.get(self.severity, 25)
         return {
             "triggered": True,
             "rule_code": self.rule_code,
             "rule_name": self.name,
+            "severity": self.severity,
             "risk_level": self.severity,
-            "risk_score": score or {"low": 35, "medium": 55, "high": 78, "critical": 92}.get(self.severity, 55),
+            "risk_score": risk_score,
+            "risk_contribution": risk_contribution,
             "reason": reason,
             "evidence": evidence,
         }

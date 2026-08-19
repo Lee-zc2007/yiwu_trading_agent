@@ -28,6 +28,13 @@ def test_all_core_agent_tools_return_schema_valid_json(client):
             ("compare_customers", {"customer_id_a": 5, "customer_id_b": 6}),
             ("generate_verification_checklist", {"customer_id": 5}),
             ("search_risk_knowledge", {"query": "义乌市场付款账户变更怎么核验", "limit": 3}),
+            ("get_risk_evaluation_criteria", {}),
+            ("get_transaction_risk", {"transaction_context": {"amount": 30000, "currency": "USD", "deposit_ratio": 0.2, "credit_days": 45}}),
+            ("calculate_risk_exposure", {"transaction_context": {"amount": 30000, "currency": "USD", "deposit_ratio": 0.2, "credit_days": 45}}),
+            ("get_evidence_completeness", {"transaction_context": {"amount": 30000, "currency": "USD", "deposit_ratio": 0.2, "credit_days": 45}}),
+            ("evaluate_credit_terms", {"transaction_context": {"amount": 30000, "currency": "USD", "deposit_ratio": 0.2, "credit_days": 45}}),
+            ("simulate_transaction_adjustment", {"base_context": {"amount": 30000, "currency": "USD", "deposit_ratio": 0.2, "credit_days": 45}, "adjustments": {"deposit_ratio": 0.4}}),
+            ("get_transaction_timeline", {"transaction_id": order_id}),
         ]
 
         for name, arguments in calls:
@@ -40,6 +47,11 @@ def test_all_core_agent_tools_return_schema_valid_json(client):
         assert transactions["transaction_count"] == 15
         assert len(transactions["recent_transactions"]) == 3
         assert transactions["average_order_amount"] > 0
+        methodology = tools.execute("get_risk_evaluation_criteria", {}).data
+        assert methodology["source_kind"] == "deterministic_configuration"
+        assert methodology["transaction_risk"]["version"] == "rules_v2"
+        assert methodology["transaction_risk"]["enabled_rule_count"] >= 20
+        assert methodology["anomaly_signal"]["role"] == "auxiliary_only"
 
 
 def test_agent_tool_rejects_invalid_or_unlisted_calls(client):
@@ -99,6 +111,13 @@ def test_tool_calling_specs_are_generated_from_strict_input_schemas(client):
             "compare_customers",
             "generate_verification_checklist",
             "search_risk_knowledge",
+            "get_risk_evaluation_criteria",
+            "get_transaction_risk",
+            "calculate_risk_exposure",
+            "get_evidence_completeness",
+            "evaluate_credit_terms",
+            "simulate_transaction_adjustment",
+            "get_transaction_timeline",
         }:
             assert name in specs
             assert specs[name]["description"]

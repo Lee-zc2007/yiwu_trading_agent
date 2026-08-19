@@ -21,7 +21,7 @@ Conversation Memory 在 Agent 包外通过 `ConversationService` 持久化，并
 
 ## LLM 失败策略
 
-只有 `AGENT_MODE=llm` 且存在 API Key 时才请求外部兼容服务。网络错误、无效 JSON、未知工具或工具参数错误都会回退到确定性 Mock Agent；核心风控 API 不依赖 LLM。
+只有 `AGENT_MODE=llm` 且存在 API Key 时才请求外部兼容服务。该模式下所有用户可见回答都经过 DeepSeek，但模型只能整理确定性 Tool 已返回的事实；交易评分、规则、敞口和授信计算不依赖 LLM 自行计算。网络错误、无效 JSON 或 Provider 异常会返回明确的 `llm-error:*`，不会生成本地替代回答。
 
 ## 生产化补充
 
